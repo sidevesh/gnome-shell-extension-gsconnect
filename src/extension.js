@@ -41,7 +41,7 @@ const ServiceToggle = GObject.registerClass({
 
     _init() {
         super._init({
-            title: 'GSConnect',
+            title: 'Devices',
             toggleMode: true,
         });
 
