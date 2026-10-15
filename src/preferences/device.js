@@ -266,6 +266,7 @@ export const Panel = GObject.registerClass({
         // Sharing
         'sharing', 'sharing-page',
         'desktop-list', 'clipboard', 'clipboard-sync', 'mousepad', 'mpris', 'systemvolume',
+        'mousepad-share-input-shortcut', 'share-input-shortcut',
         'share', 'share-list', 'receive-files', 'receive-directory',
         'links', 'links-list', 'launch-urls',
 
@@ -381,6 +382,9 @@ export const Panel = GObject.registerClass({
     }
 
     _onToggleRowActivated(box, row) {
+        if (row.get_name() === 'mousepad-share-input-shortcut')
+            return this._onShareInputShortcutActivated();
+
         const widget = row.get_child().get_child_at(1, 0);
         widget.active = !widget.active;
     }
@@ -502,6 +506,57 @@ export const Panel = GObject.registerClass({
     /**
      * Sharing Settings
      */
+    /**
+     * Add the setting for the edge the pointer leaves the screen at to move
+     * to the device, shown while the Share Input Devices plugin is enabled.
+     */
+    _shareInputDevicesSettings() {
+        const settings = this.pluginSettings('shareinputdevices');
+
+        const label = new Gtk.Label({
+            // TRANSLATORS: Followed by a screen edge, eg. "Leave Screen At: Left"
+            label: _('Leave Screen At'),
+            halign: Gtk.Align.START,
+            valign: Gtk.Align.CENTER,
+            hexpand: true,
+            vexpand: true,
+            visible: true,
+        });
+
+        const edges = new Gtk.ComboBoxText({
+            halign: Gtk.Align.END,
+            valign: Gtk.Align.CENTER,
+            visible: true,
+        });
+        edges.append('left', _('Left'));
+        edges.append('right', _('Right'));
+        edges.append('top', _('Top'));
+        edges.append('bottom', _('Bottom'));
+        settings.bind('edge', edges, 'active-id', Gio.SettingsBindFlags.DEFAULT);
+
+        const grid = new Gtk.Grid({
+            margin_start: 12,
+            margin_end: 12,
+            column_spacing: 12,
+            visible: true,
+        });
+        grid.attach(label, 0, 0, 1, 1);
+        grid.attach(edges, 1, 0, 1, 1);
+
+        const row = new Gtk.ListBoxRow({
+            height_request: 56,
+            selectable: false,
+            tooltip_text: _('Push the pointer against this edge of the screen to move it to the device, and move it off the same edge on the device to bring it back. The Stop Sharing Shortcut always brings it back.'),
+            visible: false,
+        });
+        row.add(grid);
+        row.set_name('shareinputdevices');
+        this.desktop_list.add(row);
+
+        // Shown while the plugin is enabled, like the other plugin settings
+        this.shareinputdevices = row;
+    }
+
     _sharingSettings() {
         // Share Plugin
         const settings = this.pluginSettings('share');
@@ -512,11 +567,30 @@ export const Panel = GObject.registerClass({
         );
         this._onReceiveDirectoryChanged(settings, 'receive-directory');
 
+        // Mousepad Plugin
+        const mousepadSettings = this.pluginSettings('mousepad');
+
+        mousepadSettings.connect(
+            'changed::share-input-stop-accelerator',
+            this._onShareInputShortcutChanged.bind(this)
+        );
+        this._onShareInputShortcutChanged(
+            mousepadSettings,
+            'share-input-stop-accelerator'
+        );
+
         // Visibility
         this.desktop_list.foreach(row => {
             const name = row.get_name();
-            row.visible = this.get_outgoing_supported(`${name}.request`);
+
+            // This row sends input to the device, rather than receiving it
+            if (name === 'mousepad-share-input-shortcut')
+                row.visible = this.get_incoming_supported('mousepad.request');
+            else
+                row.visible = this.get_outgoing_supported(`${name}.request`);
         });
+
+        this._shareInputDevicesSettings();
 
         // Separators & Sorting
         this.desktop_list.set_header_func(rowSeparators);
@@ -565,6 +639,34 @@ export const Panel = GObject.registerClass({
 
         if (filename !== receiveDir)
             settings.set_string('receive-directory', filename);
+    }
+
+    _onShareInputShortcutChanged(settings, key) {
+        const accelerator = settings.get_string(key);
+        const [keyval, mods] = Gtk.accelerator_parse(accelerator);
+
+        this.share_input_shortcut.label = keyval !== 0
+            ? Gtk.accelerator_get_label(keyval, mods)
+            : accelerator;
+    }
+
+    async _onShareInputShortcutActivated() {
+        try {
+            const settings = this.pluginSettings('mousepad');
+
+            const accelerator = await Keybindings.getAccelerator(
+                _('Stop Sharing Shortcut'),
+                settings.get_string('share-input-stop-accelerator')
+            );
+
+            // There must always be a way to stop sharing input
+            if (accelerator)
+                settings.set_string('share-input-stop-accelerator', accelerator);
+            else
+                settings.reset('share-input-stop-accelerator');
+        } catch (e) {
+            logError(e);
+        }
     }
 
     /**

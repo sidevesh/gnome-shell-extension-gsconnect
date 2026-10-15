@@ -22,6 +22,7 @@ import * as Device from './shell/device.js';
 import * as Keybindings from './shell/keybindings.js';
 import * as Notification from './shell/notification.js';
 import * as Input from './shell/input.js';
+import * as ShareInput from './shell/shareinput.js';
 import * as Remote from './utils/remote.js';
 import * as Setup from './utils/setup.js';
 
@@ -93,6 +94,9 @@ const ServiceToggle = GObject.registerClass({
             'notify::active',
             this._onServiceChanged.bind(this)
         );
+
+        // Moving the pointer off a screen edge onto devices
+        this._shareInput = new ShareInput.Manager(this.service);
 
         // Service Menu -> Devices Section
         this.deviceSection = new PopupMenu.PopupMenuSection();
@@ -294,6 +298,9 @@ const ServiceToggle = GObject.registerClass({
     }
 
     destroy() {
+        this._shareInput?.destroy();
+        this._shareInput = null;
+
         // Unhook from Remote.Service
         if (this.service) {
             this.service.disconnect(this._serviceChangedId);

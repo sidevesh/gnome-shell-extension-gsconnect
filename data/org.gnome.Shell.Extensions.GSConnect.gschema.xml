@@ -127,6 +127,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <key name="share-control" type="b">
       <default>true</default>
     </key>
+    <key name="share-input-stop-accelerator" type="s">
+      <default>"&lt;Control&gt;&lt;Alt&gt;Escape"</default>
+      <summary>Keyboard shortcut that stops sharing input with the device</summary>
+    </key>
   </schema>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.MPRIS">
     <key name="share-players" type="b">
@@ -165,6 +169,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </key>
     <key name="launch-urls" type="b">
       <default>false</default>
+    </key>
+  </schema>
+  <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.ShareInputDevices">
+    <key name="edge" type="s">
+      <choices>
+        <choice value="left"/>
+        <choice value="right"/>
+        <choice value="top"/>
+        <choice value="bottom"/>
+      </choices>
+      <default>"left"</default>
+      <summary>The screen edge the pointer leaves to go to the device</summary>
     </key>
   </schema>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.SMS">

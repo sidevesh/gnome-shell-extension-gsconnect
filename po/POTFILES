@@ -38,6 +38,7 @@ src/service/plugins/presenter.js
 src/service/plugins/runcommand.js
 src/service/plugins/sftp.js
 src/service/plugins/share.js
+src/service/plugins/shareinputdevices.js
 src/service/plugins/sms.js
 src/service/plugins/systemvolume.js
 src/service/plugins/telephony.js

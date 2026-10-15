@@ -14,6 +14,7 @@ import * as ping from './ping.js';
 import * as presenter from './presenter.js';
 import * as runcommand from './runcommand.js';
 import * as sftp from './sftp.js';
+import * as shareinputdevices from './shareinputdevices.js';
 import * as share from './share.js';
 import * as sms from './sms.js';
 import * as systemvolume from './systemvolume.js';
@@ -32,6 +33,7 @@ export default {
     presenter,
     runcommand,
     sftp,
+    shareinputdevices,
     share,
     sms,
     systemvolume,

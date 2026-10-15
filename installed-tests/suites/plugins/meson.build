@@ -18,6 +18,7 @@ plugin_tests = [
   'PresenterPlugin',
   'RuncommandPlugin',
   'SftpPlugin',
+  'ShareinputdevicesPlugin',
   'SharePlugin',
   'SmsPlugin',
   'SystemvolumePlugin',
