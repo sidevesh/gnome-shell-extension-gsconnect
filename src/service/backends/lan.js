@@ -9,6 +9,7 @@ import GObject from 'gi://GObject';
 import Config from '../../config.js';
 import * as Core from '../core.js';
 import Device from '../device.js';
+import {Dnssd} from './dnssd.js';
 
 // Retain compatibility with GLib < 2.80, which lacks GioUnix
 let GioUnix;
@@ -224,6 +225,11 @@ export const ChannelService = GObject.registerClass({
         this._networkMonitor = Gio.NetworkMonitor.get_default();
         this._networkAvailable = false;
         this._networkChangedId = 0;
+
+        // Publish and discover devices with mDNS while discoverable
+        this._dnssd = null;
+        this._discoverableId = this.connect('notify::discoverable',
+            this._updateDnssd.bind(this));
     }
 
     get certificate() {
@@ -273,6 +279,39 @@ export const ChannelService = GObject.registerClass({
 
         this._networkAvailable = network_available;
         this.broadcast();
+    }
+
+    _getDnssdInfo() {
+        return {
+            id: this.identity.body.deviceId,
+            name: this.identity.body.deviceName,
+            type: this.identity.body.deviceType,
+            protocolVersion: this.identity.body.protocolVersion,
+            port: this._tcpPort,
+        };
+    }
+
+    _updateDnssd() {
+        if (this.active && this.discoverable) {
+            if (this._dnssd === null) {
+                this._dnssd = new Dnssd();
+                this._dnssd.connect('service-found',
+                    this._onServiceFound.bind(this));
+            }
+
+            this._dnssd.start(this._getDnssdInfo());
+        } else if (this._dnssd !== null) {
+            this._dnssd.destroy();
+            this._dnssd = null;
+        }
+    }
+
+    _onServiceFound(dnssd, id, address) {
+        // Identify directly to the device, as if we had received its broadcast
+        const socketAddress = _parseSocketAddress(address, this.port);
+
+        if (socketAddress !== null)
+            this._sendIdentity(socketAddress);
     }
 
     _initCertificate() {
@@ -529,12 +568,29 @@ export const ChannelService = GObject.registerClass({
             if (address instanceof Gio.InetSocketAddress) {
                 this._allowed.add(address.address.to_string());
 
-            // Broadcast to the network if no address is specified
+            // Broadcast to the network if no address is specified, and identify
+            // to the devices found with mDNS, which might not see broadcasts
             } else {
                 debug('Broadcasting to LAN');
                 address = this._udp_address;
+
+                for (const service of this._dnssd?.services.values() ?? [])
+                    this._onServiceFound(this._dnssd, service.id, service.address);
             }
 
+            this._sendIdentity(address);
+        } catch (e) {
+            debug(e, address);
+        }
+    }
+
+    /**
+     * Send the identity packet to an address.
+     *
+     * @param {Gio.InetSocketAddress} address - The address to send to
+     */
+    _sendIdentity(address) {
+        try {
             // Send on a socket that can carry this address family. Note that
             // when the IPv6 socket is dual-stack _initUdpListener() leaves
             // _udp4 as null, so IPv4 targets fall through to it.
@@ -557,6 +613,9 @@ export const ChannelService = GObject.registerClass({
         // Chain-up, then add the TCP port
         super.buildIdentity();
         this.identity.body.tcpPort = this._tcpPort;
+
+        // Publish the new name
+        this._dnssd?.update(this._getDnssdInfo());
     }
 
     start() {
@@ -593,6 +652,8 @@ export const ChannelService = GObject.registerClass({
 
         this._active = true;
         this.notify('active');
+
+        this._updateDnssd();
     }
 
     stop() {
@@ -627,6 +688,8 @@ export const ChannelService = GObject.registerClass({
 
         this._active = false;
         this.notify('active');
+
+        this._updateDnssd();
     }
 
     destroy() {

@@ -301,6 +301,9 @@ const Manager = GObject.registerClass({
                 });
                 this.backends.set(name, backend);
 
+                this.bind_property('discoverable', backend, 'discoverable',
+                    GObject.BindingFlags.SYNC_CREATE);
+
                 // Connect to the backend
                 backend.__channelId = backend.connect(
                     'channel',

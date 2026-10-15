@@ -311,6 +311,13 @@ export const ChannelService = GObject.registerClass({
             GObject.ParamFlags.READABLE,
             false
         ),
+        'discoverable': GObject.ParamSpec.boolean(
+            'discoverable',
+            'Discoverable',
+            'Whether new devices may find this device',
+            GObject.ParamFlags.READWRITE,
+            false
+        ),
         'id': GObject.ParamSpec.string(
             'id',
             'ID',
@@ -347,6 +354,21 @@ export const ChannelService = GObject.registerClass({
             this._cancellable = new Gio.Cancellable();
 
         return this._cancellable;
+    }
+
+    get discoverable() {
+        if (this._discoverable === undefined)
+            this._discoverable = false;
+
+        return this._discoverable;
+    }
+
+    set discoverable(discoverable) {
+        if (this.discoverable === discoverable)
+            return;
+
+        this._discoverable = discoverable;
+        this.notify('discoverable');
     }
 
     get name() {
