@@ -259,6 +259,64 @@ SPDX-License-Identifier: GPL-2.0-or-later
                               </object>
                             </child>
                             <child>
+                              <object class="GtkListBoxRow" id="mousepad-share-input-shortcut">
+                                <property name="height_request">56</property>
+                                <property name="visible">True</property>
+                                <property name="can_focus">True</property>
+                                <property name="selectable">False</property>
+                                <property name="tooltip_text" translatable="yes">Keyboard shortcut that stops sharing the mouse and keyboard with the device</property>
+                                <child>
+                                  <object class="GtkGrid">
+                                    <property name="visible">True</property>
+                                    <property name="can_focus">False</property>
+                                    <property name="margin_start">12</property>
+                                    <property name="margin_end">12</property>
+                                    <property name="column_spacing">12</property>
+                                    <child>
+                                      <object class="GtkLabel" id="share-input-shortcut-label">
+                                        <property name="visible">True</property>
+                                        <property name="can_focus">False</property>
+                                        <property name="halign">start</property>
+                                        <property name="valign">center</property>
+                                        <property name="hexpand">True</property>
+                                        <property name="vexpand">True</property>
+                                        <property name="label" translatable="yes">Stop Sharing Shortcut</property>
+                                        <accessibility>
+                                          <relation type="label-for" target="mousepad-share-input-shortcut"/>
+                                          <relation type="label-for" target="share-input-shortcut"/>
+                                        </accessibility>
+                                      </object>
+                                      <packing>
+                                        <property name="left_attach">0</property>
+                                        <property name="top_attach">0</property>
+                                      </packing>
+                                    </child>
+                                    <child>
+                                      <object class="GtkLabel" id="share-input-shortcut">
+                                        <property name="visible">True</property>
+                                        <property name="can_focus">False</property>
+                                        <property name="halign">end</property>
+                                        <property name="valign">center</property>
+                                        <style>
+                                          <class name="dim-label"/>
+                                        </style>
+                                        <accessibility>
+                                          <relation type="labelled-by" target="share-input-shortcut-label"/>
+                                        </accessibility>
+                                      </object>
+                                      <packing>
+                                        <property name="left_attach">1</property>
+                                        <property name="top_attach">0</property>
+                                      </packing>
+                                    </child>
+                                  </object>
+                                </child>
+                                <accessibility>
+                                  <relation type="labelled-by" target="share-input-shortcut-label"/>
+                                </accessibility>
+                              </object>
+                            </child>
+                            <child>
                               <object class="GtkListBoxRow" id="systemvolume">
                                 <property name="height_request">56</property>
                                 <property name="visible">True</property>

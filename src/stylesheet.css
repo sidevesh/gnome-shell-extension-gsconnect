@@ -125,3 +125,41 @@ StBin.gsconnect-tooltip (inherits from .osd-window)
 .gsconnect-tooltip StLabel:rtl {
     text-align: right;
 }
+
+
+/* Input Sharing Session
+
+StWidget.gsconnect-input-session-overlay
+    StBoxLayout.gsconnect-input-session-dialog
+        StLabel.gsconnect-input-session-title
+        StLabel.gsconnect-input-session-subtitle
+        StLabel.gsconnect-input-session-status
+*/
+.gsconnect-input-session-overlay {
+    background-color: rgba(0, 0, 0, 0.3);
+}
+
+.gsconnect-input-session-dialog {
+    background-color: rgba(42, 42, 42, 0.9);
+    border-radius: 24px;
+    padding: 32px 48px;
+    spacing: 12px;
+}
+
+.gsconnect-input-session-title {
+    color: #ffffff;
+    font-size: 1.2em;
+    font-weight: bold;
+    text-align: center;
+}
+
+.gsconnect-input-session-subtitle {
+    color: #ffffff;
+    text-align: center;
+}
+
+.gsconnect-input-session-status {
+    color: #cccccc;
+    font-size: 0.9em;
+    text-align: center;
+}

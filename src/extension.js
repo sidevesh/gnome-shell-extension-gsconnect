@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -22,6 +23,7 @@ import * as Device from './shell/device.js';
 import * as Keybindings from './shell/keybindings.js';
 import * as Notification from './shell/notification.js';
 import * as Input from './shell/input.js';
+import * as RemoteInput from './shell/remoteinput.js';
 import * as Remote from './utils/remote.js';
 import * as Setup from './utils/setup.js';
 
@@ -93,6 +95,9 @@ const ServiceToggle = GObject.registerClass({
             'notify::active',
             this._onServiceChanged.bind(this)
         );
+
+        // Sharing local input with devices at a screen edge
+        this._remoteInput = new RemoteInput.Manager(this.service);
 
         // Service Menu -> Devices Section
         this.deviceSection = new PopupMenu.PopupMenuSection();
@@ -178,13 +183,39 @@ const ServiceToggle = GObject.registerClass({
 
     _onDeviceAdded(service, device) {
         try {
+            // Actions the shell handles itself, instead of the service; the
+            // "Remote Input" item starts a local input capture session
+            device._actionOverrides = {
+                keyboard: () => {
+                    // The menu item's own popup is already closed by this
+                    // point, but that's only the device submenu; also close
+                    // the top-level Quick Settings panel it's nested in
+                    QuickSettingsMenu.menu.close();
+
+                    // Defer starting the session to the next main loop
+                    // iteration. Doing it synchronously nests our modal
+                    // grab inside the click event's own dispatch (still
+                    // unwinding through the menu item's button handling),
+                    // which appears to leave the grab in a state where it
+                    // stops receiving events after the very first one.
+                    GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                        this._remoteInput.startSession(device);
+                        return GLib.SOURCE_REMOVE;
+                    });
+                },
+            };
+
             // Device Indicator
-            const indicator = new Device.Indicator({device: device});
+            const indicator = new Device.Indicator({
+                device: device,
+                action_overrides: device._actionOverrides,
+            });
             Main.panel.addToStatusArea(device.g_object_path, indicator);
 
             // Device Menu
             const menu = new Device.Menu({
                 device: device,
+                action_overrides: device._actionOverrides,
                 menu_type: 'list',
             });
             this._menus[device.g_object_path] = menu;
@@ -261,7 +292,12 @@ const ServiceToggle = GObject.registerClass({
 
                 const actionId = this._keybindings.add(
                     accelerator,
-                    () => device.action_group.activate_action(name, parameter)
+                    () => {
+                        if (device._actionOverrides?.[name] !== undefined)
+                            device._actionOverrides[name]();
+                        else
+                            device.action_group.activate_action(name, parameter);
+                    }
                 );
 
                 if (actionId !== 0)
@@ -294,6 +330,12 @@ const ServiceToggle = GObject.registerClass({
     }
 
     destroy() {
+        // Stop sharing input
+        if (this._remoteInput) {
+            this._remoteInput.destroy();
+            this._remoteInput = null;
+        }
+
         // Unhook from Remote.Service
         if (this.service) {
             this.service.disconnect(this._serviceChangedId);

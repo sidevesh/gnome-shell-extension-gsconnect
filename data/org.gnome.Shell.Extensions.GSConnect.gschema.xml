@@ -127,6 +127,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <key name="share-control" type="b">
       <default>true</default>
     </key>
+    <key name="share-input-stop-accelerator" type="s">
+      <default>"&lt;Control&gt;&lt;Alt&gt;Escape"</default>
+      <summary>Keyboard shortcut that stops sharing input with the device</summary>
+    </key>
   </schema>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.MPRIS">
     <key name="share-players" type="b">

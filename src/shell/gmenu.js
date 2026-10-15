@@ -202,11 +202,20 @@ export class ListBox extends PopupMenu.PopupMenuSection {
             this.submenu = item.submenu;
             item.submenu.firstMenuItem.active = true;
         } else if (item.action_name) {
-            this.action_group.activate_action(
-                item.action_name,
-                item.action_target
-            );
-            super.itemActivated();
+            // Actions the shell handles itself, instead of the service
+            if (this.action_overrides?.[item.action_name] !== undefined) {
+                // Close the menu before dispatching, so overrides that take
+                // a modal grab (eg. Remote Input) don't fight the menu's
+                // own grab
+                super.itemActivated();
+                this.action_overrides[item.action_name]();
+            } else {
+                this.action_group.activate_action(
+                    item.action_name,
+                    item.action_target
+                );
+                super.itemActivated();
+            }
         }
     }
 
@@ -236,6 +245,7 @@ export class ListBox extends PopupMenu.PopupMenuSection {
         const section = new ListBox({
             model: model,
             action_group: this.action_group,
+            action_overrides: this.action_overrides,
         });
         this.addMenuItem(section);
     }
@@ -268,6 +278,7 @@ export class ListBox extends PopupMenu.PopupMenuSection {
         item.submenu = new ListBox({
             model: model,
             action_group: this.action_group,
+            action_overrides: this.action_overrides,
             submenu_for: item,
             _parent: this,
         });
@@ -447,6 +458,7 @@ export const IconButton = GObject.registerClass({
                 this.submenu = new ListBox({
                     model: link.value,
                     action_group: this.action_group,
+                    action_overrides: this.action_overrides,
                     _parent: this._parent,
                 });
 
@@ -473,10 +485,15 @@ export const IconButton = GObject.registerClass({
         if (!this.toggle_mode) {
             this._parent._getTopMenu().close();
 
-            this.action_group.activate_action(
-                this.action_name,
-                this.action_target
-            );
+            // Actions the shell handles itself, instead of the service
+            if (this.action_overrides?.[this.action_name] !== undefined) {
+                this.action_overrides[this.action_name]();
+            } else {
+                this.action_group.activate_action(
+                    this.action_name,
+                    this.action_target
+                );
+            }
 
         // StButton.checked has already been toggled so we're opening
         } else if (this.checked) {
@@ -641,6 +658,7 @@ export class IconBox extends PopupMenu.PopupMenuSection {
             // Create an iconic button
             const button = new IconButton({
                 action_group: this.action_group,
+                action_overrides: this.action_overrides,
                 info: getItemInfo(model, index),
                 // NOTE: Because this doesn't derive from a PopupMenu class
                 //       it lacks some things its parent will expect from it

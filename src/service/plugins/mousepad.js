@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import Gdk from 'gi://Gdk';
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 
 import * as Components from '../components/index.js';
@@ -34,6 +36,14 @@ export const Metadata = {
                 'kdeconnect.mousepad.echo',
                 'kdeconnect.mousepad.keyboardstate',
             ],
+            outgoing: ['kdeconnect.mousepad.request'],
+        },
+        sendEvents: {
+            label: _('Send Input Events'),
+            icon_name: 'input-mouse-symbolic',
+
+            parameter_type: new GLib.VariantType('s'),
+            incoming: [],
             outgoing: ['kdeconnect.mousepad.request'],
         },
     },
@@ -142,6 +152,14 @@ const MousepadPlugin = GObject.registerClass({
             'changed::share-control',
             this._sendState.bind(this)
         );
+
+        // A stateful action reflecting the remote keyboard state, so the
+        // GNOME Shell extension can relay it while sharing input
+        this._remoteStateAction = new Gio.SimpleAction({
+            name: 'remoteKeyboardState',
+            state: GLib.Variant.new_boolean(false),
+        });
+        this.device.add_action(this._remoteStateAction);
     }
 
     get state() {
@@ -162,6 +180,7 @@ const MousepadPlugin = GObject.registerClass({
 
         this._state = false;
         this.notify('state');
+        this._remoteStateAction.set_state(GLib.Variant.new_boolean(false));
     }
 
     handlePacket(packet) {
@@ -313,6 +332,7 @@ const MousepadPlugin = GObject.registerClass({
     _handleState(packet) {
         this._state = !!packet.body.state;
         this.notify('state');
+        this._remoteStateAction.set_state(GLib.Variant.new_boolean(this._state));
     }
 
     /**
@@ -346,6 +366,22 @@ const MousepadPlugin = GObject.registerClass({
     }
 
     /**
+     * Send a batch of input events to the remote device. This is used by the
+     * GNOME Shell extension to forward captured pointer and keyboard events.
+     *
+     * @param {string} events - A JSON string of `kdeconnect.mousepad.request`
+     *     packet bodies
+     */
+    sendEvents(events) {
+        for (const body of JSON.parse(events)) {
+            this.device.sendPacket({
+                type: 'kdeconnect.mousepad.request',
+                body: body,
+            });
+        }
+    }
+
+    /**
      * Open the Keyboard Input dialog
      */
     keyboard() {
@@ -369,6 +405,8 @@ const MousepadPlugin = GObject.registerClass({
 
         if (this._dialog !== undefined)
             this._dialog.destroy();
+
+        this.device.remove_action('remoteKeyboardState');
 
         this.settings.disconnect(this._shareControlChangedId);
 

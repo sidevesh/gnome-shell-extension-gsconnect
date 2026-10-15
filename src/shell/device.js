@@ -333,11 +333,13 @@ export class Menu extends PopupMenu.PopupMenuSection {
         if (this.menu_type === 'icon') {
             actions = new GMenu.IconBox({
                 action_group: this.device.action_group,
+                action_overrides: this.action_overrides,
                 model: this.device.menu,
             });
         } else if (this.menu_type === 'list') {
             actions = new GMenu.ListBox({
                 action_group: this.device.action_group,
+                action_overrides: this.action_overrides,
                 model: this.device.menu,
             });
         }
@@ -372,6 +374,7 @@ export const Indicator = GObject.registerClass({
         // Menu
         const menu = new Menu({
             device: this.device,
+            action_overrides: this.action_overrides,
             menu_type: 'icon',
         });
         this.menu.addMenuItem(menu);

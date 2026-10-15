@@ -81,6 +81,9 @@ describe('The mousepad plugin', function () {
 
         expect(localPlugin.device.get_action_enabled('keyboard')).toBeTrue();
         expect(remotePlugin.device.get_action_enabled('keyboard')).toBeTrue();
+
+        expect(localPlugin.device.get_action_enabled('sendEvents')).toBeTrue();
+        expect(remotePlugin.device.get_action_enabled('sendEvents')).toBeTrue();
     });
 
     it('sends its keyboard state when connected', async function () {
@@ -97,6 +100,30 @@ describe('The mousepad plugin', function () {
 
         await remotePlugin.awaitPacket('kdeconnect.mousepad.keyboardstate');
         expect(remotePlugin.state).toBe(!previousState);
+    });
+
+    it('reflects the remote keyboard state as an action state', async function () {
+        localPlugin.settings.set_boolean('share-control', true);
+
+        await remotePlugin.awaitPacket('kdeconnect.mousepad.keyboardstate');
+        const state = remotePlugin.device.get_action_state('remoteKeyboardState');
+        expect(state.get_boolean()).toBeTrue();
+    });
+
+    it('forwards batched events sent with sendEvents', async function () {
+        localPlugin.sendEvents(JSON.stringify([
+            {dx: 3, dy: -3},
+            {singleclick: true},
+        ]));
+
+        await remotePlugin.awaitPacket('kdeconnect.mousepad.request',
+            {dx: 3, dy: -3});
+        await remotePlugin.awaitPacket('kdeconnect.mousepad.request',
+            {singleclick: true});
+
+        expect(remotePlugin._input.movePointer).toHaveBeenCalledWith(3, -3);
+        expect(remotePlugin._input.clickPointer).toHaveBeenCalledWith(
+            Gdk.BUTTON_PRIMARY);
     });
 
     describe('handles keypresses', function () {
