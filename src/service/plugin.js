@@ -12,6 +12,12 @@ import plugins from './plugins/index.js';
 
 
 /**
+ * How long to wait after a change before writing a plugin's cache, in seconds.
+ */
+const CACHE_SAVE_DELAY = 5;
+
+
+/**
  * Base class for device plugins.
  */
 const Plugin = GObject.registerClass({
@@ -209,6 +215,42 @@ const Plugin = GObject.registerClass({
      */
     cacheLoaded() {}
 
+    _serializeCache() {
+        const cache = {};
+
+        for (const name of this._cacheProperties)
+            cache[name] = this[name];
+
+        return JSON.stringify(cache);
+    }
+
+    /**
+     * Write the cache to disk soon. Plugins call this when cached properties
+     * change, so the changes survive the service stopping without destroy()
+     * being called, such as when the session ends.
+     */
+    saveCache() {
+        if (this._cacheFile === undefined || this._saveCacheId)
+            return;
+
+        this._saveCacheId = GLib.timeout_add_seconds(GLib.PRIORITY_LOW,
+            CACHE_SAVE_DELAY, () => {
+                this._saveCacheId = 0;
+                this._writeCacheAsync();
+                return GLib.SOURCE_REMOVE;
+            });
+    }
+
+    async _writeCacheAsync() {
+        try {
+            const contents = new GLib.Bytes(this._serializeCache());
+            await this._cacheFile.replace_contents_bytes_async(contents, null,
+                false, Gio.FileCreateFlags.REPLACE_DESTINATION, null);
+        } catch (e) {
+            debug(e.message, `${this.device.name}: ${this.name}`);
+        }
+    }
+
     /**
      * Unregister plugin actions, write the cache (if applicable) and destroy
      * any dangling signal handlers.
@@ -224,16 +266,15 @@ const Plugin = GObject.registerClass({
         }
 
         // Write the cache to disk synchronously
+        if (this._saveCacheId) {
+            GLib.Source.remove(this._saveCacheId);
+            this._saveCacheId = 0;
+        }
+
         if (this._cacheFile !== undefined) {
             try {
-                // Build the cache
-                const cache = {};
-
-                for (const name of this._cacheProperties)
-                    cache[name] = this[name];
-
                 this._cacheFile.replace_contents(
-                    JSON.stringify(cache, null, 2),
+                    this._serializeCache(),
                     null,
                     false,
                     Gio.FileCreateFlags.REPLACE_DESTINATION,
