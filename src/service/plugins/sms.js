@@ -6,6 +6,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 
+import Config from '../../config.js';
 import Plugin from '../plugin.js';
 import LegacyMessagingDialog from '../ui/legacyMessaging.js';
 import * as Messaging from '../ui/messaging.js';
@@ -17,10 +18,12 @@ export const Metadata = {
     description: _('Send and read SMS of the paired device and be notified of new SMS'),
     id: 'org.gnome.Shell.Extensions.GSConnect.Plugin.SMS',
     incomingCapabilities: [
+        'kdeconnect.sms.attachment_file',
         'kdeconnect.sms.messages',
     ],
     outgoingCapabilities: [
         'kdeconnect.sms.request',
+        'kdeconnect.sms.request_attachment',
         'kdeconnect.sms.request_conversation',
         'kdeconnect.sms.request_conversations',
     ],
@@ -115,6 +118,12 @@ export const MessageStatus = {
  * FAILED: Failed outgoing messages
  * QUEUED: Messages queued to send later
  */
+/**
+ * How long to wait for the device to send a requested attachment, in seconds.
+ */
+const ATTACHMENT_TIMEOUT = 60;
+
+
 export const MessageBox = {
     ALL: 0,
     INBOX: 1,
@@ -149,6 +158,9 @@ const SMSPlugin = GObject.registerClass({
         super._init(device, 'sms');
 
         this.cacheProperties(['_threads']);
+
+        // Attachments requested from the device, by unique identifier
+        this._attachmentRequests = new Map();
     }
 
     get threads() {
@@ -200,6 +212,128 @@ const SMSPlugin = GObject.registerClass({
             case 'kdeconnect.sms.messages':
                 this._handleMessages(packet.body.messages);
                 break;
+
+            case 'kdeconnect.sms.attachment_file':
+                this._handleAttachmentFile(packet);
+                break;
+        }
+    }
+
+    /**
+     * Get the local file for an MMS attachment, in the device's cache.
+     *
+     * @param {string} uniqueIdentifier - The attachment's unique identifier
+     * @returns {Gio.File} The file, which may not exist yet
+     */
+    getAttachmentFile(uniqueIdentifier) {
+        // The identifier comes from the device; keep it in the cache directory
+        let basename = GLib.path_get_basename(uniqueIdentifier);
+
+        if (!basename || basename === '.' || basename === '..')
+            basename = 'unnamed-attachment';
+
+        const dirpath = GLib.build_filenamev([Config.CACHEDIR, this.device.id,
+            'attachments']);
+        GLib.mkdir_with_parents(dirpath, 448);
+
+        return Gio.File.new_for_path(GLib.build_filenamev([dirpath, basename]));
+    }
+
+    /**
+     * Get an MMS attachment, requesting it from the device unless it was
+     * downloaded already.
+     *
+     * @param {object} attachment - An attachment object of a message
+     * @param {number} attachment.part_id - The attachment's part ID
+     * @param {string} attachment.unique_identifier - The attachment's name
+     * @returns {Promise<Gio.File>} The downloaded file
+     */
+    requestAttachment(attachment) {
+        const uniqueIdentifier = attachment.unique_identifier;
+        const file = this.getAttachmentFile(uniqueIdentifier);
+
+        if (file.query_exists(null))
+            return Promise.resolve(file);
+
+        let request = this._attachmentRequests.get(uniqueIdentifier);
+
+        if (request === undefined) {
+            request = {file};
+            request.promise = new Promise((resolve, reject) => {
+                request.resolve = resolve;
+                request.reject = reject;
+            });
+            request.timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
+                ATTACHMENT_TIMEOUT, () => {
+                    this._finishAttachmentRequest(uniqueIdentifier,
+                        new Gio.IOErrorEnum({
+                            code: Gio.IOErrorEnum.TIMED_OUT,
+                            message: 'The device did not send the attachment',
+                        }));
+                    return GLib.SOURCE_REMOVE;
+                });
+            this._attachmentRequests.set(uniqueIdentifier, request);
+
+            this.device.sendPacket({
+                type: 'kdeconnect.sms.request_attachment',
+                body: {
+                    part_id: attachment.part_id,
+                    unique_identifier: uniqueIdentifier,
+                },
+            });
+        }
+
+        return request.promise;
+    }
+
+    _finishAttachmentRequest(uniqueIdentifier, error = null) {
+        const request = this._attachmentRequests.get(uniqueIdentifier);
+
+        if (request === undefined)
+            return;
+
+        this._attachmentRequests.delete(uniqueIdentifier);
+
+        if (request.timeoutId)
+            GLib.Source.remove(request.timeoutId);
+
+        if (error === null)
+            request.resolve(request.file);
+        else
+            request.reject(error);
+    }
+
+    /**
+     * Receive an MMS attachment the device was asked for.
+     *
+     * @param {object} packet - A `kdeconnect.sms.attachment_file` packet
+     */
+    async _handleAttachmentFile(packet) {
+        const uniqueIdentifier = packet.body.filename;
+        const request = this._attachmentRequests.get(uniqueIdentifier);
+
+        // Only accept attachments that were requested
+        if (request === undefined || !packet.hasPayload()) {
+            this.device.rejectTransfer(packet);
+            return;
+        }
+
+        // Download next to the final file, so it never holds a partial one
+        const partial = request.file.get_parent().get_child(
+            `.${request.file.get_basename()}.part`);
+
+        try {
+            const transfer = this.device.createTransfer();
+            transfer.addFile(packet, partial);
+            await transfer.start();
+
+            partial.move(request.file, Gio.FileCopyFlags.OVERWRITE, null,
+                null);
+            this._finishAttachmentRequest(uniqueIdentifier);
+        } catch (e) {
+            debug(e, this.device.name);
+            partial.delete_async(GLib.PRIORITY_DEFAULT, null, null);
+            this._finishAttachmentRequest(uniqueIdentifier, e);
         }
     }
 
@@ -523,6 +657,14 @@ const SMSPlugin = GObject.registerClass({
     destroy() {
         if (this._window !== undefined)
             this._window.destroy();
+
+        for (const uniqueIdentifier of [...this._attachmentRequests.keys()]) {
+            this._finishAttachmentRequest(uniqueIdentifier,
+                new Gio.IOErrorEnum({
+                    code: Gio.IOErrorEnum.CANCELLED,
+                    message: 'Cancelled',
+                }));
+        }
 
         super.destroy();
     }

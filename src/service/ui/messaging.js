@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import Gdk from 'gi://Gdk';
+import GdkPixbuf from 'gi://GdkPixbuf';
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Gtk from 'gi://Gtk';
@@ -183,6 +185,77 @@ function getDetailedTime(time) {
 
 
 /**
+ * The largest size of an attachment thumbnail, in pixels.
+ */
+const THUMBNAIL_SIZE = 240;
+
+
+/**
+ * Describe the attachments of a message for a conversation summary.
+ *
+ * @param {object[]} attachments - The attachments of a message
+ * @returns {string} A short description, such as "Picture"
+ */
+export function getAttachmentDescription(attachments) {
+    const mimeType = attachments[0].mime_type ?? '';
+
+    if (mimeType.startsWith('image/'))
+        // TRANSLATORS: A message containing a picture, in a conversation summary
+        return _('Picture');
+
+    if (mimeType.startsWith('video/'))
+        // TRANSLATORS: A message containing a video, in a conversation summary
+        return _('Video');
+
+    if (mimeType.startsWith('audio/'))
+        // TRANSLATORS: A message containing audio, in a conversation summary
+        return _('Audio');
+
+    // TRANSLATORS: A message containing a file, in a conversation summary
+    return _('Attachment');
+}
+
+
+/**
+ * Decode the base64-encoded thumbnail of an attachment.
+ *
+ * @param {string} encoded - The base64-encoded image
+ * @returns {?GdkPixbuf.Pixbuf} The thumbnail, scaled to fit, or %null
+ */
+function decodeThumbnail(encoded) {
+    try {
+        const loader = new GdkPixbuf.PixbufLoader();
+        loader.write_bytes(new GLib.Bytes(GLib.base64_decode(encoded)));
+        loader.close();
+
+        const pixbuf = loader.get_pixbuf();
+        const scale = Math.min(1, THUMBNAIL_SIZE /
+            Math.max(pixbuf.width, pixbuf.height));
+
+        if (scale === 1)
+            return pixbuf;
+
+        return pixbuf.scale_simple(Math.round(pixbuf.width * scale),
+            Math.round(pixbuf.height * scale), GdkPixbuf.InterpType.BILINEAR);
+    } catch (e) {
+        debug(e);
+        return null;
+    }
+}
+
+
+/**
+ * Whether a message has anything to show.
+ *
+ * @param {object} message - A message object
+ * @returns {boolean} If the message has a body or attachments
+ */
+export function hasContent(message) {
+    return Boolean(message.body) || message.attachments?.length > 0;
+}
+
+
+/**
  * Make the avatar for an incoming message visible or invisible
  *
  * @param {ConversationMessage} row - The message row to modify
@@ -214,16 +287,22 @@ const ConversationMessage = GObject.registerClass({
     Template: 'resource:///org/gnome/Shell/Extensions/GSConnect/ui/messaging-conversation-message.ui',
     Children: ['grid', 'avatar', 'sender-label', 'message-label'],
 }, class ConversationMessage extends Gtk.ListBoxRow {
-    _init(contact, message) {
+    _init(contact, message, plugin = null) {
         super._init();
 
         this.contact = contact;
         this.message = message;
+        this.plugin = plugin;
 
         // Sort properties
         this.sender = message.addresses[0].address || 'unknown';
-        this.message_label.label = URI.linkify(message.body);
+        this.message_label.label = URI.linkify(message.body || '');
         this.message_label.tooltip_text = getDetailedTime(message.date);
+        this.message_label.visible = Boolean(message.body);
+
+        // MMS attachments
+        if (message.attachments?.length > 0)
+            this._addAttachments(message.attachments);
 
         // Add avatar for incoming messages
         if (message.type === Sms.MessageBox.INBOX) {
@@ -240,6 +319,77 @@ const ConversationMessage = GObject.registerClass({
             this.message_label.halign = Gtk.Align.START;
         } else {
             this.message_label.get_style_context().add_class('message-out');
+        }
+    }
+
+    _addAttachments(attachments) {
+        const incoming = this.message.type === Sms.MessageBox.INBOX;
+        const box = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 6,
+            halign: incoming ? Gtk.Align.START : Gtk.Align.END,
+            visible: true,
+        });
+
+        for (const attachment of attachments)
+            box.add(this._createAttachmentButton(attachment));
+
+        this.grid.attach(box, 1, 2, 1, 1);
+    }
+
+    _createAttachmentButton(attachment) {
+        const mimeType = attachment.mime_type || 'application/octet-stream';
+        const thumbnail = attachment.encoded_thumbnail
+            ? decodeThumbnail(attachment.encoded_thumbnail)
+            : null;
+
+        let child;
+
+        if (thumbnail !== null) {
+            child = new Gtk.Image({pixbuf: thumbnail, visible: true});
+        } else {
+            child = new Gtk.Box({spacing: 6, visible: true});
+            child.add(new Gtk.Image({
+                gicon: Gio.content_type_get_symbolic_icon(mimeType),
+                visible: true,
+            }));
+            child.add(new Gtk.Label({
+                label: Gio.content_type_get_description(mimeType),
+                visible: true,
+            }));
+        }
+
+        const button = new Gtk.Button({
+            child: child,
+            relief: Gtk.ReliefStyle.NONE,
+            // TRANSLATORS: Tooltip for a picture or file in a message
+            tooltip_text: _('Open'),
+            sensitive: this.plugin !== null,
+            visible: true,
+        });
+        button.get_style_context().add_class('message-attachment');
+        button.connect('clicked', () => this._openAttachment(button, attachment));
+
+        return button;
+    }
+
+    async _openAttachment(button, attachment) {
+        button.sensitive = false;
+        // TRANSLATORS: Tooltip while a picture or file is being downloaded
+        button.tooltip_text = _('Downloading…');
+
+        try {
+            const file = await this.plugin.requestAttachment(attachment);
+
+            Gtk.show_uri_on_window(this.get_toplevel(), file.get_uri(),
+                Gtk.get_current_event_time());
+            button.tooltip_text = _('Open');
+        } catch (e) {
+            debug(e);
+            // TRANSLATORS: Tooltip when a picture or file couldn't be downloaded
+            button.tooltip_text = _('Failed to download');
+        } finally {
+            button.sensitive = true;
         }
     }
 
@@ -563,7 +713,8 @@ const Conversation = GObject.registerClass({
             });
         }
 
-        return new ConversationMessage(this.contacts[sender], message);
+        return new ConversationMessage(this.contacts[sender], message,
+            this.plugin);
     }
 
     _populateMessages() {
@@ -767,8 +918,10 @@ const ConversationSummary = GObject.registerClass({
             this.name_label.tooltip_text = participants.join(', ');
         }
 
-        // Contact Name & Message body
-        let bodyLabel = message.body.split(/\r|\n/)[0];
+        // Contact Name & Message body, or a description of its attachments
+        let bodyLabel = message.body
+            ? message.body.split(/\r|\n/)[0]
+            : getAttachmentDescription(message.attachments);
         bodyLabel = GLib.markup_escape_text(bodyLabel, -1);
 
         // Ignore the 'read' flag if it's an outgoing message
@@ -999,8 +1152,8 @@ export const Window = GObject.registerClass({
         for (const [thread_id, thread] of Object.entries(this.plugin.threads)) {
             const message = thread[thread.length - 1];
 
-            // Skip messages without a body (eg. MMS messages without text)
-            if (message.body)
+            // Skip messages without a body or attachments
+            if (hasContent(message))
                 messages[thread_id] = thread[thread.length - 1];
         }
 

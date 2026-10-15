@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import GLib from 'gi://GLib';
+
 import * as Utils from '../fixtures/utils.js';
 
 
@@ -142,6 +144,17 @@ function handlePacket(packet) {
                 this.sendPacket(Packets.thread_two);
 
             break;
+
+        case 'kdeconnect.sms.request_attachment': {
+            // Send a picture, named by the unique identifier
+            const transfer = this.createTransfer();
+            transfer.addFile({
+                type: 'kdeconnect.sms.attachment_file',
+                body: {filename: packet.body.unique_identifier},
+            }, Utils.getDataFile('album.png'));
+            transfer.start();
+            break;
+        }
     }
 }
 
@@ -156,28 +169,36 @@ describe('The sms plugin', function () {
         await testRig.prepare({
             localDevice: {
                 incomingCapabilities: [
+                    'kdeconnect.sms.attachment_file',
                     'kdeconnect.sms.messages',
                     'kdeconnect.sms.request',
+                    'kdeconnect.sms.request_attachment',
                     'kdeconnect.sms.request_conversation',
                     'kdeconnect.sms.request_conversations',
                 ],
                 outgoingCapabilities: [
+                    'kdeconnect.sms.attachment_file',
                     'kdeconnect.sms.messages',
                     'kdeconnect.sms.request',
+                    'kdeconnect.sms.request_attachment',
                     'kdeconnect.sms.request_conversation',
                     'kdeconnect.sms.request_conversations',
                 ],
             },
             remoteDevice: {
                 incomingCapabilities: [
+                    'kdeconnect.sms.attachment_file',
                     'kdeconnect.sms.messages',
                     'kdeconnect.sms.request',
+                    'kdeconnect.sms.request_attachment',
                     'kdeconnect.sms.request_conversation',
                     'kdeconnect.sms.request_conversations',
                 ],
                 outgoingCapabilities: [
+                    'kdeconnect.sms.attachment_file',
                     'kdeconnect.sms.messages',
                     'kdeconnect.sms.request',
+                    'kdeconnect.sms.request_attachment',
                     'kdeconnect.sms.request_conversation',
                     'kdeconnect.sms.request_conversations',
                 ],
@@ -190,6 +211,12 @@ describe('The sms plugin', function () {
     });
 
     afterAll(function () {
+        // Remove the attachments the tests downloaded
+        if (localPlugin) {
+            const dir = localPlugin.getAttachmentFile('x').get_parent();
+            GLib.spawn_command_line_sync(`rm -rf ${GLib.shell_quote(dir.get_path())}`);
+        }
+
         testRig.destroy();
     });
 
@@ -271,6 +298,62 @@ describe('The sms plugin', function () {
             phoneNumber: '555-555-5555',
             messageBody: 'message body',
         });
+    });
+
+    it('downloads MMS attachments when asked', async function () {
+        spyOn(remoteDevice, 'handlePacket').and.callThrough();
+
+        const file = await localPlugin.requestAttachment({
+            part_id: 7,
+            unique_identifier: 'PART_123.png',
+        });
+
+        await remoteDevice.awaitPacket('kdeconnect.sms.request_attachment', {
+            part_id: 7,
+            unique_identifier: 'PART_123.png',
+        });
+
+        expect(file.get_basename()).toBe('PART_123.png');
+
+        const [, received] = file.load_contents(null);
+        const [, expected] = Utils.getDataFile('album.png').load_contents(null);
+        expect(received).toEqual(expected);
+    });
+
+    it('does not request attachments it already has', async function () {
+        spyOn(localPlugin.device, 'sendPacket').and.callThrough();
+
+        const file = await localPlugin.requestAttachment({
+            part_id: 7,
+            unique_identifier: 'PART_123.png',
+        });
+
+        expect(file.query_exists(null)).toBeTrue();
+        expect(localPlugin.device.sendPacket).not.toHaveBeenCalled();
+    });
+
+    it('keeps attachments in its cache directory', function () {
+        const file = localPlugin.getAttachmentFile('../../escape.png');
+
+        expect(file.get_basename()).toBe('escape.png');
+        expect(file.get_parent().get_basename()).toBe('attachments');
+    });
+
+    it('refuses attachments it did not ask for', async function () {
+        spyOn(localPlugin.device, 'rejectTransfer').and.callThrough();
+
+        const transfer = remoteDevice.createTransfer();
+        transfer.addFile({
+            type: 'kdeconnect.sms.attachment_file',
+            body: {filename: 'unrequested.png'},
+        }, Utils.getDataFile('album.png'));
+        transfer.start().catch(() => {});
+
+        await localPlugin.awaitPacket('kdeconnect.sms.attachment_file');
+
+        expect(localPlugin.device.rejectTransfer).toHaveBeenCalled();
+        expect(localPlugin.getAttachmentFile('unrequested.png')
+            .query_exists(null)).toBeFalse();
     });
 
     it('disables its GActions when disconnected', function () {
