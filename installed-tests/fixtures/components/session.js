@@ -2,8 +2,18 @@
 //
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import GObject from 'gi://GObject';
 
-export default class MockSessionComponent {
+
+const MockSessionComponent = GObject.registerClass({
+    GTypeName: 'GSConnectMockSession',
+    Signals: {
+        'changed': {
+            flags: GObject.SignalFlags.RUN_FIRST,
+        },
+    },
+}, class MockSessionComponent extends GObject.Object {
+
     get idle() {
         if (this._idle === undefined)
             this._idle = false;
@@ -23,6 +33,18 @@ export default class MockSessionComponent {
         return !(this.idle || this.locked);
     }
 
+    lock() {
+        this.update({locked: true});
+
+        return Promise.resolve();
+    }
+
+    unlock() {
+        this.update({locked: false});
+
+        return Promise.resolve();
+    }
+
     /**
      * Update the session with an object of properties and values.
      *
@@ -31,5 +53,9 @@ export default class MockSessionComponent {
     update(obj) {
         for (const [propertyName, propertyValue] of Object.entries(obj))
             this[`_${propertyName}`] = propertyValue;
+
+        this.emit('changed');
     }
-}
+});
+
+export default MockSessionComponent;

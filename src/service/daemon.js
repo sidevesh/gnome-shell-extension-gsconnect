@@ -559,6 +559,24 @@ const Service = GObject.registerClass({
             null
         );
 
+        this.add_main_option(
+            'lock',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            _('Lock'),
+            null
+        );
+
+        this.add_main_option(
+            'unlock',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            _('Unlock'),
+            null
+        );
+
         /*
          * Sharing
          */
@@ -805,6 +823,12 @@ const Service = GObject.registerClass({
 
             if (options.contains('ring'))
                 this._cliAction(id, 'ring');
+
+            if (options.contains('lock'))
+                this._cliAction(id, 'lock');
+
+            if (options.contains('unlock'))
+                this._cliAction(id, 'unlock');
 
             if (options.contains('share-file'))
                 this._cliShareFile(id, options);

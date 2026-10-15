@@ -4,10 +4,24 @@
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
 
 
-const Session = class {
-    constructor() {
+/**
+ * The user's login session, as tracked by systemd-logind.
+ */
+const Session = GObject.registerClass({
+    GTypeName: 'GSConnectSession',
+    Signals: {
+        'changed': {
+            flags: GObject.SignalFlags.RUN_FIRST,
+        },
+    },
+}, class Session extends GObject.Object {
+
+    _init() {
+        super._init();
+
         this._connection = Gio.DBus.system;
         this._session = null;
 
@@ -76,6 +90,11 @@ const Session = class {
                 g_interface_name: 'org.freedesktop.login1.Session',
             });
             await this._session.init_async(GLib.PRIORITY_DEFAULT, null);
+
+            this._propertiesChangedId = this._session.connect(
+                'g-properties-changed',
+                () => this.emit('changed')
+            );
         } catch (e) {
             this._session = null;
             logError(e);
@@ -101,14 +120,45 @@ const Session = class {
         return !(this.idle || this.locked);
     }
 
+    async _callSession(method) {
+        if (this._session === null) {
+            throw new Gio.IOErrorEnum({
+                code: Gio.IOErrorEnum.NOT_INITIALIZED,
+                message: 'No login session',
+            });
+        }
+
+        await this._session.call(method, null, Gio.DBusCallFlags.NONE, -1,
+            null);
+    }
+
+    /**
+     * Ask logind to lock the session.
+     */
+    async lock() {
+        await this._callSession('Lock');
+    }
+
+    /**
+     * Ask logind to unlock the session. The desktop's screen locker unlocks
+     * without asking for the password.
+     */
+    async unlock() {
+        await this._callSession('Unlock');
+    }
+
     destroy() {
+        if (this._propertiesChangedId) {
+            this._session.disconnect(this._propertiesChangedId);
+            this._propertiesChangedId = 0;
+        }
+
         this._session = null;
     }
-};
+});
 
 
 /**
  * The service class for this component
  */
 export default Session;
-

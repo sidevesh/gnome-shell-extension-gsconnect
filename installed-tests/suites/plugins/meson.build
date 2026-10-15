@@ -11,6 +11,7 @@ plugin_tests = [
   'ClipboardPlugin',
   'ContactsPlugin',
   'FindmyphonePlugin',
+  'LockdevicePlugin',
   'MousepadPlugin',
   'MprisPlugin',
   'NotificationPlugin',

@@ -7,6 +7,7 @@ import * as clipboard from './clipboard.js';
 import * as connectivity_report from './connectivity_report.js';
 import * as contacts from './contacts.js';
 import * as findmyphone from './findmyphone.js';
+import * as lockdevice from './lockdevice.js';
 import * as mousepad from './mousepad.js';
 import * as mpris from './mpris.js';
 import * as notification from './notification.js';
@@ -25,6 +26,7 @@ export default {
     connectivity_report,
     contacts,
     findmyphone,
+    lockdevice,
     mousepad,
     mpris,
     notification,

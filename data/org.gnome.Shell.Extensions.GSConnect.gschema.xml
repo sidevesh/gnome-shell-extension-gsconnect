@@ -62,7 +62,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <default>{}</default>
     </key>
     <key name="menu-actions" type="as">
-      <default>["sms", "ring", "mount", "commands", "share", "keyboard"]</default>
+      <default>["sms", "ring", "mount", "commands", "share", "keyboard", "lock"]</default>
     </key>
     <key name="name" type="s">
       <default>""</default>
@@ -144,6 +144,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <default>'{}'</default>
     </key>
   </schema>
+  <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.LockDevice"/>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.Ping"/>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.Presenter"/>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.RunCommand">
