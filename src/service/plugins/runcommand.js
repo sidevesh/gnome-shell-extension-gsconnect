@@ -19,6 +19,7 @@ export const Metadata = {
     ],
     outgoingCapabilities: [
         'kdeconnect.runcommand',
+        'kdeconnect.runcommand.output',
         'kdeconnect.runcommand.request',
     ],
     actions: {
@@ -40,6 +41,17 @@ export const Metadata = {
         },
     },
 };
+
+
+/**
+ * The maximum number of output lines sent in one packet, matching KDE Connect.
+ */
+const OUTPUT_BATCH_LINES = 5;
+
+/**
+ * How long to wait for more output before sending a partial batch, in ms.
+ */
+const OUTPUT_FLUSH_DELAY = 100;
 
 
 /**
@@ -74,6 +86,11 @@ const RunCommandPlugin = GObject.registerClass({
         // when the device is offline.
         this._remote_commands = {};
         this.cacheProperties(['_remote_commands']);
+
+        // Commands the device started, by the ID sent with their output
+        this._processes = new Map();
+        this._nextProcessId = 0;
+        this._cancellable = new Gio.Cancellable();
     }
 
     get remote_commands() {
@@ -115,6 +132,9 @@ const RunCommandPlugin = GObject.registerClass({
                 else if (packet.body.hasOwnProperty('requestCommandList'))
                     this._sendCommandList();
 
+                else if (packet.body.hasOwnProperty('stop'))
+                    this._stopCommands();
+
                 break;
         }
     }
@@ -136,14 +156,146 @@ const RunCommandPlugin = GObject.registerClass({
                 });
             }
 
-            this.device.launchProcess([
-                '/bin/sh',
-                '-c',
-                commandList[key].command,
-            ]);
+            const command = commandList[key].command;
+            const proc = this.device.launchProcess(
+                ['/bin/sh', '-c', command],
+                null,
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+            );
+
+            this._reportCommand(proc, command);
         } catch (e) {
             logError(e, this.device.name);
         }
+    }
+
+    /**
+     * Send a running command's output and exit status to the device, which
+     * shows them to the user.
+     *
+     * @param {Gio.Subprocess} proc - The command's process
+     * @param {string} command - The command line
+     */
+    async _reportCommand(proc, command) {
+        const id = this._nextProcessId++;
+        this._processes.set(id, proc);
+
+        try {
+            this._sendOutput({commandStarted: true, command: command, id: id});
+
+            await Promise.all([
+                this._readOutput(id, proc.get_stdout_pipe(), 'stdout'),
+                this._readOutput(id, proc.get_stderr_pipe(), 'stderr'),
+            ]);
+            await proc.wait_async(this._cancellable);
+
+            this._sendOutput({
+                commandFinished: true,
+                success: proc.get_successful(),
+                exitCode: proc.get_if_exited() ? proc.get_exit_status() : -1,
+                id: id,
+            });
+        } catch (e) {
+            if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                logError(e, this.device.name);
+        } finally {
+            this._processes.delete(id);
+        }
+    }
+
+    /**
+     * Read one of a command's output streams line by line, sending the lines
+     * in small batches.
+     *
+     * @param {number} id - The ID of the command
+     * @param {Gio.InputStream} stream - The command's stdout or stderr
+     * @param {string} name - Either `stdout` or `stderr`
+     */
+    async _readOutput(id, stream, name) {
+        const dataStream = new Gio.DataInputStream({base_stream: stream});
+        const decoder = new TextDecoder();
+        let lines = [];
+        let flushId = 0;
+
+        const flush = () => {
+            if (flushId !== 0) {
+                GLib.Source.remove(flushId);
+                flushId = 0;
+            }
+
+            if (lines.length === 0)
+                return;
+
+            this._sendOutput({
+                commandOutput: true,
+                stdout: name === 'stdout' ? lines : [],
+                stderr: name === 'stderr' ? lines : [],
+                id: id,
+            });
+            lines = [];
+        };
+
+        const scheduleFlush = () => {
+            if (flushId !== 0)
+                return;
+
+            flushId = GLib.timeout_add(GLib.PRIORITY_DEFAULT,
+                OUTPUT_FLUSH_DELAY, () => {
+                    flushId = 0;
+                    flush();
+                    return GLib.SOURCE_REMOVE;
+                });
+        };
+
+        try {
+            let line;
+
+            while ((line = await this._readLine(dataStream)) !== null) {
+                lines.push(decoder.decode(line));
+
+                if (lines.length >= OUTPUT_BATCH_LINES)
+                    flush();
+                else
+                    scheduleFlush();
+            }
+        } finally {
+            flush();
+            dataStream.close(null);
+        }
+    }
+
+    /**
+     * Read a line as bytes, since command output isn't always valid UTF-8.
+     *
+     * @param {Gio.DataInputStream} stream - The stream to read from
+     * @returns {Promise<Uint8Array|null>} The line, or %null at the end
+     */
+    _readLine(stream) {
+        return new Promise((resolve, reject) => {
+            stream.read_line_async(GLib.PRIORITY_DEFAULT, this._cancellable,
+                (_stream, res) => {
+                    try {
+                        resolve(stream.read_line_finish(res)[0]);
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+        });
+    }
+
+    _sendOutput(body) {
+        this.device.sendPacket({
+            type: 'kdeconnect.runcommand.output',
+            body: body,
+        });
+    }
+
+    /**
+     * Stop the local commands the device started.
+     */
+    _stopCommands() {
+        for (const proc of this._processes.values())
+            proc.send_signal(15); // SIGTERM
     }
 
     /**
@@ -245,6 +397,7 @@ const RunCommandPlugin = GObject.registerClass({
     }
 
     destroy() {
+        this._cancellable.cancel();
         this.settings.disconnect(this._commandListChangedId);
 
         super.destroy();

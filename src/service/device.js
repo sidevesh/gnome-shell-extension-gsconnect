@@ -395,9 +395,10 @@ const Device = GObject.registerClass({
      *
      * @param {string[]} args - process arguments
      * @param {Gio.Cancellable} [cancellable] - optional cancellable
+     * @param {Gio.SubprocessFlags} [flags] - optional subprocess flags
      * @returns {Gio.Subprocess} The subprocess
      */
-    launchProcess(args, cancellable = null) {
+    launchProcess(args, cancellable = null, flags = Gio.SubprocessFlags.NONE) {
         if (this._launcher === undefined) {
             const application = GLib.build_filenamev([
                 Config.PACKAGE_DATADIR,
@@ -418,7 +419,15 @@ const Device = GObject.registerClass({
         }
 
         // Create and track the process
-        const proc = this._launcher.spawnv(args);
+        let proc;
+
+        try {
+            this._launcher.set_flags(flags);
+            proc = this._launcher.spawnv(args);
+        } finally {
+            this._launcher.set_flags(Gio.SubprocessFlags.NONE);
+        }
+
         proc.wait_check_async(cancellable, this._processExit.bind(this._procs));
         this._procs.add(proc);
 

@@ -27,6 +27,7 @@ describe('The runcommand plugin', function () {
             remoteDevice: {
                 incomingCapabilities: [
                     'kdeconnect.runcommand',
+                    'kdeconnect.runcommand.output',
                     'kdeconnect.runcommand.request',
                 ],
                 outgoingCapabilities: [
@@ -96,7 +97,7 @@ describe('The runcommand plugin', function () {
     });
 
     it('can activate a remote command', async function () {
-        spyOn(localPlugin.device, 'launchProcess');
+        spyOn(localPlugin.device, 'launchProcess').and.callThrough();
         remotePlugin.executeCommand('command-uuid');
 
         await localPlugin.awaitPacket('kdeconnect.runcommand.request', {
@@ -104,6 +105,112 @@ describe('The runcommand plugin', function () {
         });
 
         expect(localPlugin.device.launchProcess).toHaveBeenCalled();
+    });
+
+    /**
+     * Get the bodies of the output packets the remote device received for a
+     * command, in order.
+     *
+     * @param {string} command - The command line
+     * @returns {object[]} The packet bodies
+     */
+    function getCommandOutput(command) {
+        const bodies = remotePlugin.device.handlePacket.calls.allArgs()
+            .map(([packet]) => packet)
+            .filter(packet => packet.type === 'kdeconnect.runcommand.output')
+            .map(packet => packet.body);
+        const {id} = bodies.find(body => body.command === command);
+
+        return bodies.filter(body => body.id === id);
+    }
+
+    it('sends the output and result of a command it runs', async function () {
+        const commandList = new GLib.Variant('a{sv}', {
+            'output-uuid': new GLib.Variant('a{ss}', {
+                name: 'Output Command',
+                command: 'echo one; echo two; echo oops >&2; exit 3',
+            }),
+        });
+        localPlugin.settings.set_value('command-list', commandList);
+        spyOn(remotePlugin.device, 'handlePacket').and.callThrough();
+
+        remotePlugin.executeCommand('output-uuid');
+
+        await remotePlugin.device.awaitPacket('kdeconnect.runcommand.output', {
+            commandFinished: true,
+            exitCode: 3,
+        });
+
+        const bodies = getCommandOutput(
+            'echo one; echo two; echo oops >&2; exit 3');
+        expect(bodies[0].commandStarted).toBeTrue();
+
+        const outputs = bodies.filter(body => body.commandOutput);
+        expect(outputs.flatMap(body => body.stdout)).toEqual(['one', 'two']);
+        expect(outputs.flatMap(body => body.stderr)).toEqual(['oops']);
+
+        expect(bodies.at(-1)).toEqual(jasmine.objectContaining({
+            commandFinished: true,
+            success: false,
+            exitCode: 3,
+        }));
+    });
+
+    it('sends long output in batches of five lines', async function () {
+        const commandList = new GLib.Variant('a{sv}', {
+            'batch-uuid': new GLib.Variant('a{ss}', {
+                name: 'Batch Command',
+                command: 'seq 12',
+            }),
+        });
+        localPlugin.settings.set_value('command-list', commandList);
+        spyOn(remotePlugin.device, 'handlePacket').and.callThrough();
+
+        remotePlugin.executeCommand('batch-uuid');
+
+        await remotePlugin.device.awaitPacket('kdeconnect.runcommand.output', {
+            command: 'seq 12',
+        });
+
+        const stdout = [];
+
+        while (!getCommandOutput('seq 12').at(-1).commandFinished)
+            await Promise.idle(GLib.PRIORITY_DEFAULT);
+
+        for (const body of getCommandOutput('seq 12')) {
+            if (body.commandOutput)
+                stdout.push(body.stdout);
+        }
+
+        expect(stdout.every(lines => lines.length <= 5)).toBeTrue();
+        expect(stdout.flat()).toEqual(
+            Array.from({length: 12}, (_, i) => `${i + 1}`));
+    });
+
+    it('stops running commands when asked', async function () {
+        const commandList = new GLib.Variant('a{sv}', {
+            'sleep-uuid': new GLib.Variant('a{ss}', {
+                name: 'Sleep Command',
+                command: 'exec sleep 30',
+            }),
+        });
+        localPlugin.settings.set_value('command-list', commandList);
+        spyOn(remotePlugin.device, 'handlePacket').and.callThrough();
+
+        remotePlugin.executeCommand('sleep-uuid');
+        await remotePlugin.device.awaitPacket('kdeconnect.runcommand.output', {
+            commandStarted: true,
+        });
+
+        remotePlugin.device.sendPacket({
+            type: 'kdeconnect.runcommand.request',
+            body: {stop: true},
+        });
+
+        await remotePlugin.device.awaitPacket('kdeconnect.runcommand.output', {
+            commandFinished: true,
+            success: false,
+        });
     });
 
     it('disables its GActions when disconnected', function () {

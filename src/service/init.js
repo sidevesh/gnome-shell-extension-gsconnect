@@ -48,6 +48,7 @@ Gio._promisify(Gio.OutputStream.prototype, 'write_all_async');
 Gio._promisify(Gio.SocketClient.prototype, 'connect_async');
 Gio._promisify(Gio.SocketListener.prototype, 'accept_async');
 Gio._promisify(Gio.Subprocess.prototype, 'communicate_utf8_async');
+Gio._promisify(Gio.Subprocess.prototype, 'wait_async');
 Gio._promisify(Gio.Subprocess.prototype, 'wait_check_async');
 Gio._promisify(Gio.TlsConnection.prototype, 'handshake_async');
 Gio._promisify(Gio.DtlsConnection.prototype, 'handshake_async');
