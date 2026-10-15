@@ -23,6 +23,13 @@ try {
 
 
 /**
+ * How many trailing digits of a phone number the number index uses. Numbers
+ * match when one ends with the other, so equal numbers share these.
+ */
+const INDEX_DIGITS = 7;
+
+
+/**
  * A store for contacts
  */
 const Store = GObject.registerClass({
@@ -59,6 +66,44 @@ const Store = GObject.registerClass({
 
         this._cacheData = {};
         this._edsPrepared = false;
+        this._numberIndex = null;
+    }
+
+    /**
+     * Get an index of the contacts by the trailing digits of their numbers,
+     * built when first needed after the contacts change.
+     *
+     * @returns {object} The index, and the contacts with short numbers
+     */
+    _getNumberIndex() {
+        if (this._numberIndex !== null)
+            return this._numberIndex;
+
+        const index = {byDigits: new Map(), short: new Set()};
+        const contacts = this.contacts;
+
+        for (let i = 0, len = contacts.length; i < len; i++) {
+            const contact = contacts[i];
+
+            for (const num of contact.numbers) {
+                const number = num.value.toPhoneNumber();
+
+                if (number.length < INDEX_DIGITS) {
+                    index.short.add(i);
+                    continue;
+                }
+
+                const key = number.slice(-INDEX_DIGITS);
+
+                if (!index.byDigits.has(key))
+                    index.byDigits.set(key, new Set());
+
+                index.byDigits.get(key).add(i);
+            }
+        }
+
+        this._numberIndex = {...index, contacts};
+        return this._numberIndex;
     }
 
     /**
@@ -359,11 +404,24 @@ const Store = GObject.registerClass({
      * @returns {object} A contact object
      */
     query(query) {
-        // First look for an existing contact by number
-        const contacts = this.contacts;
+        // First look for an existing contact by number, among the contacts
+        // whose numbers could match: those ending in the same digits, and
+        // those with numbers too short to index
+        const {byDigits, short, contacts} = this._getNumberIndex();
+        const number = query.number.toPhoneNumber();
+        let candidates;
+
+        if (number.length < INDEX_DIGITS) {
+            candidates = contacts.keys();
+        } else {
+            const indexed = byDigits.get(number.slice(-INDEX_DIGITS)) ?? [];
+            candidates = [...new Set([...indexed, ...short])]
+                .sort((a, b) => a - b);
+        }
+
         const matches = [];
 
-        for (let i = 0, len = contacts.length; i < len; i++) {
+        for (const i of candidates) {
             const contact = contacts[i];
 
             for (const num of contact.numbers) {
@@ -425,6 +483,8 @@ const Store = GObject.registerClass({
         if (!contact.origin)
             contact.origin = 'gsconnect';
 
+        this._numberIndex = null;
+
         // This is an updated contact
         if (this._cacheData[contact.id]) {
             this._cacheData[contact.id] = contact;
@@ -451,6 +511,7 @@ const Store = GObject.registerClass({
         // Only remove if the contact actually exists
         if (this._cacheData[id]) {
             delete this._cacheData[id];
+            this._numberIndex = null;
             this.emit('contact-removed', id);
 
             // Write if requested
@@ -554,6 +615,7 @@ const Store = GObject.registerClass({
         try {
             const [contents] = await this._cacheFile.load_contents_async(null);
             this._cacheData = JSON.parse(new TextDecoder().decode(contents));
+            this._numberIndex = null;
         } catch (e) {
             debug(e);
         } finally {

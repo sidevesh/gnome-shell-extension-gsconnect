@@ -8,7 +8,7 @@ component_tests_metadir = join_paths(installed_tests_metadir, 'components')
 # Component Suites
 component_tests = [
   'ClipboardComponent',
-  # 'ContactsComponent',
+  'ContactsComponent',
   # 'InputComponent',
   'MprisComponent',
   # 'NotificationComponent',
