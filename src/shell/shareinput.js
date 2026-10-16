@@ -30,12 +30,6 @@ const PRESSURE_STEP = 15;
 const FLUSH_INTERVAL = 16;
 
 /**
- * How close, in pixels, the hidden pointer may get to the edge of the screen
- * before it is moved back to the middle, so its motion isn't cut short.
- */
-const RECENTER_MARGIN = 200;
-
-/**
  * The shortcut that takes the pointer back if the device's Stop Sharing
  * Shortcut can't be read: Ctrl+Alt+Escape.
  */
@@ -388,7 +382,7 @@ class EdgeBarrier {
  * Nothing is shown: the cursor is hidden, as it has moved to the device.
  *
  * Pointer motion is measured from the hidden pointer's position, which is moved
- * back to the middle of the screen whenever it nears an edge. That is done
+ * back to the middle of the screen whenever it strays from it. That is done
  * from a timer, never from an event handler: warping while Clutter dispatches
  * an event has broken the grab before. (Clutter.Event.get_relative_motion()
  * can't be called from GJS, as its out arguments aren't annotated.)
@@ -470,8 +464,7 @@ class CaptureSession {
                 primary.x + Math.floor(primary.width / 2),
                 primary.y + Math.floor(primary.height / 2),
             ];
-            this._bounds = [left, top,
-                left + this._actor.width, top + this._actor.height];
+            this._size = [primary.width, primary.height];
             this._recenter();
 
             this._flushId = GLib.timeout_add(GLib.PRIORITY_DEFAULT,
@@ -507,19 +500,48 @@ class CaptureSession {
         this._onStop(point ?? this._exitPoint);
     }
 
-    _recenter() {
+    /**
+     * Move the pointer back to the middle of the primary monitor.
+     *
+     * Motion events still queued from before the move may arrive after it,
+     * or be merged by Clutter with the first one after it, so the motion up
+     * to where the pointer is now is counted here instead. Those events are
+     * then far from the middle, and ignored (see _onMotion()).
+     *
+     * @param {number[]} [pointer] - Where the pointer is now, unless the
+     *   session is starting
+     */
+    _recenter(pointer = null) {
+        if (pointer !== null) {
+            this._motionDx += pointer[0] - this._lastCoords[0];
+            this._motionDy += pointer[1] - this._lastCoords[1];
+        }
+
         getSeat().warp_pointer(...this._center);
         this._lastCoords = [...this._center];
         this._recentered = true;
     }
 
-    _maybeRecenter() {
-        const [x, y] = this._lastCoords;
-        const [left, top, right, bottom] = this._bounds;
+    /**
+     * Whether a position is more than a fraction of the primary monitor's
+     * size away from its middle.
+     *
+     * @param {number[]} point - A position
+     * @param {number} fraction - The fraction of the monitor's size
+     * @returns {boolean} %true if the position is that far away
+     */
+    _isAwayFromCenter([x, y], fraction) {
+        return Math.abs(x - this._center[0]) > this._size[0] * fraction ||
+            Math.abs(y - this._center[1]) > this._size[1] * fraction;
+    }
 
-        if (x - left < RECENTER_MARGIN || right - x < RECENTER_MARGIN ||
-            y - top < RECENTER_MARGIN || bottom - y < RECENTER_MARGIN)
-            this._recenter();
+    _maybeRecenter() {
+        const pointer = global.get_pointer().slice(0, 2);
+
+        // Leave a quarter of the monitor for the pointer to move in before
+        // the next check, so it never stops at an edge
+        if (this._isAwayFromCenter(pointer, 1 / 4))
+            this._recenter(pointer);
     }
 
     _teardown() {
@@ -631,14 +653,13 @@ class CaptureSession {
     _onMotion(event) {
         const [x, y] = event.get_coords();
 
-        // A motion from before the pointer was moved to the middle may still
-        // arrive after it; its position is far from the middle
+        // Motion from before the pointer was moved back to the middle has
+        // already been counted (see _recenter())
         if (this._recentered) {
-            this._recentered = false;
-
-            if (Math.abs(x - this._center[0]) > RECENTER_MARGIN / 2 ||
-                Math.abs(y - this._center[1]) > RECENTER_MARGIN / 2)
+            if (this._isAwayFromCenter([x, y], 1 / 8))
                 return;
+
+            this._recentered = false;
         }
 
         this._motionDx += x - this._lastCoords[0];
