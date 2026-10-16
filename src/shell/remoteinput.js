@@ -22,6 +22,7 @@ import {HAS_ST_ORIENTATION} from './utils.js';
  */
 const FLUSH_INTERVAL = 16;
 
+
 /**
  * A map of Clutter to "KDE Connect" keyvals
  */
@@ -204,8 +205,7 @@ class InputSession {
         const backend = global.stage.context?.get_backend() ??
             Clutter.get_default_backend();
         this._seat = backend.get_default_seat();
-        this._cursorTracker = global.backend.get_cursor_tracker();
-        this._cursorHidden = false;
+        this._recentered = false;
         this._centerX = this._monitor.x + Math.floor(this._monitor.width / 2);
         this._centerY = this._monitor.y + Math.floor(this._monitor.height / 2);
 
@@ -257,7 +257,7 @@ class InputSession {
         this._statusLabel = new St.Label({
             style_class: 'gsconnect-input-session-status',
             // TRANSLATORS: %s is a device name
-            text: _('Remote keyboard on %s is not active').format(
+            text: _('Typing won’t reach %s until its remote keyboard is on').format(
                 this._device.name),
             visible: false,
         });
@@ -326,14 +326,15 @@ class InputSession {
                 () => this.stop()
             );
 
-            // Park the pointer in the middle of the monitor and stream
-            // relative motion from there, hiding the cursor since it's
-            // only being used as a fixed reference point.
-            this._seat.warp_pointer(this._centerX, this._centerY);
-            this._lastX = this._centerX;
-            this._lastY = this._centerY;
-            this._cursorTracker.inhibit_cursor_visibility();
-            this._cursorHidden = true;
+            // Hide the cursor while over the grab actor, since the pointer is
+            // only a reference point for measuring motion. Inhibiting the
+            // cursor with Meta.CursorTracker instead stops pointer events
+            // reaching the grab, as of GNOME 51.
+            this._actor.set_cursor_type?.(Clutter.CursorType.NONE);
+
+            // Park the pointer in the middle of the monitor and measure
+            // motion from there
+            this._recenter();
 
             this._flushId = GLib.timeout_add(
                 GLib.PRIORITY_DEFAULT,
@@ -346,9 +347,7 @@ class InputSession {
                     // handler (ie. from _onMotion) re-enters event dispatch
                     // synchronously, which trips a Mutter consistency check
                     // and can wedge the modal grab after a single event.
-                    this._seat.warp_pointer(this._centerX, this._centerY);
-                    this._lastX = this._centerX;
-                    this._lastY = this._centerY;
+                    this._maybeRecenter();
 
                     return GLib.SOURCE_CONTINUE;
                 }
@@ -381,15 +380,56 @@ class InputSession {
     }
 
     /**
+     * Move the pointer back to the middle of the monitor.
+     *
+     * Motion events still queued from before the move may arrive after it,
+     * or be merged by Clutter with the first one after it, so the motion up
+     * to where the pointer is now is counted here instead. Those events are
+     * then far from the middle, and ignored (see _onMotion()).
+     *
+     * @param {number[]} [pointer] - Where the pointer is now, unless the
+     *   session is starting
+     */
+    _recenter(pointer = null) {
+        if (pointer !== null) {
+            this._motionDx += pointer[0] - this._lastX;
+            this._motionDy += pointer[1] - this._lastY;
+        }
+
+        this._seat.warp_pointer(this._centerX, this._centerY);
+        this._lastX = this._centerX;
+        this._lastY = this._centerY;
+        this._recentered = true;
+    }
+
+    /**
+     * Whether a position is more than a fraction of the monitor's size away
+     * from its middle.
+     *
+     * @param {number} x - A horizontal position
+     * @param {number} y - A vertical position
+     * @param {number} fraction - The fraction of the monitor's size
+     * @returns {boolean} %true if the position is that far away
+     */
+    _isAwayFromCenter(x, y, fraction) {
+        return Math.abs(x - this._centerX) > this._monitor.width * fraction ||
+            Math.abs(y - this._centerY) > this._monitor.height * fraction;
+    }
+
+    _maybeRecenter() {
+        const pointer = global.get_pointer().slice(0, 2);
+
+        // Leave a quarter of the monitor for the pointer to move in before
+        // the next check, so it never stops at an edge
+        if (this._isAwayFromCenter(...pointer, 1 / 4))
+            this._recenter(pointer);
+    }
+
+    /**
      * Release the grab and disconnect any handlers, tolerating partially
      * initialized state (eg. if start() failed partway through).
      */
     _teardown() {
-        if (this._cursorHidden) {
-            this._cursorTracker.uninhibit_cursor_visibility();
-            this._cursorHidden = false;
-        }
-
         if (this._flushId > 0) {
             GLib.Source.remove(this._flushId);
             this._flushId = 0;
@@ -476,6 +516,11 @@ class InputSession {
                 this._updateDebugLabel();
                 return this._onScroll(event);
 
+            // Crossing events must propagate
+            case Clutter.EventType.ENTER:
+            case Clutter.EventType.LEAVE:
+                return Clutter.EVENT_PROPAGATE;
+
             default:
                 this._updateDebugLabel();
                 return Clutter.EVENT_STOP;
@@ -532,18 +577,20 @@ class InputSession {
 
     _onMotion(event) {
         const [x, y] = event.get_coords();
-        const dx = x - this._lastX;
-        const dy = y - this._lastY;
 
+        // Motion from before the pointer was moved back to the middle has
+        // already been counted (see _recenter())
+        if (this._recentered) {
+            if (this._isAwayFromCenter(x, y, 1 / 8))
+                return Clutter.EVENT_STOP;
+
+            this._recentered = false;
+        }
+
+        this._motionDx += x - this._lastX;
+        this._motionDy += y - this._lastY;
         this._lastX = x;
         this._lastY = y;
-
-        // The pointer is re-centered periodically by the flush timer, not
-        // from here (see start()), so no warp-back-to-center events to skip
-        if (dx !== 0 || dy !== 0) {
-            this._motionDx += dx;
-            this._motionDy += dy;
-        }
 
         return Clutter.EVENT_STOP;
     }
