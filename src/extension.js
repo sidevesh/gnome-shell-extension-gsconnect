@@ -38,14 +38,14 @@ const ServiceToggle = GObject.registerClass({
 
     _init() {
         super._init({
-            title: 'GSConnect',
+            title: _('Mobile Devices'),
             toggleMode: true,
         });
 
         this.set({iconName: 'org.gnome.Shell.Extensions.GSConnect-symbolic'});
 
         // Set QuickMenuToggle header.
-        this.menu.setHeader('org.gnome.Shell.Extensions.GSConnect-symbolic', 'GSConnect',
+        this.menu.setHeader('org.gnome.Shell.Extensions.GSConnect-symbolic', _('Mobile Devices'),
             _('Sync between your devices'));
 
         this._menus = {};
