@@ -35,7 +35,7 @@ const Preferences = GObject.registerClass({
         });
 
         GLib.set_prgname('gsconnect-preferences');
-        GLib.set_application_name(_('GSConnect Preferences'));
+        GLib.set_application_name(_('Mobile Devices Settings'));
     }
 
     vfunc_activate() {

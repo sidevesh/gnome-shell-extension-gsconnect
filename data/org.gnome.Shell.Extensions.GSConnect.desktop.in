@@ -4,7 +4,7 @@
 
 [Desktop Entry]
 Type=Application
-Name=GSConnect
+Name=Mobile Devices
 Exec=gapplication launch org.gnome.Shell.Extensions.GSConnect %U
 Terminal=false
 NoDisplay=true

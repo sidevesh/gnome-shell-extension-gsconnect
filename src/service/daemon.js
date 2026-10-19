@@ -51,7 +51,7 @@ const Service = GObject.registerClass({
         });
 
         GLib.set_prgname('gsconnect');
-        GLib.set_application_name('GSConnect');
+        GLib.set_application_name(_('Mobile Devices'));
 
         // Command-line
         this._initOptions();
