@@ -2,6 +2,9 @@
 //
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+
 import * as Utils from '../fixtures/utils.js';
 
 import Config from '../config.js';
@@ -89,6 +92,77 @@ describe('The sftp plugin', function () {
         localPlugin = testRig.localDevice._plugins.get('sftp');
 
         expect(localPlugin).toBeDefined();
+    });
+
+    describe('bookmarks', function () {
+        let bookmarksFile;
+
+        const read = () => new TextDecoder().decode(
+            bookmarksFile.load_contents(null)[1]);
+
+        beforeAll(function () {
+            const dir = GLib.dir_make_tmp('gsconnect.XXXXXX');
+            bookmarksFile = Gio.File.new_for_path(
+                GLib.build_filenamev([dir, 'gtk-3.0', 'bookmarks']));
+            localPlugin.bookmarksFile = bookmarksFile;
+        });
+
+        it('creates the bookmarks file if needed', function () {
+            localPlugin.toggleBookmark();
+
+            const uri = localPlugin._getBookmarkUri();
+
+            expect(uri).toMatch(/\/by-name\//);
+            expect(read()).toBe(`${uri} ${localPlugin.device.name}\n`);
+            expect(localPlugin.isBookmarked()).toBeTrue();
+        });
+
+        it('removes only its own bookmark', function () {
+            const uri = localPlugin._getBookmarkUri();
+            bookmarksFile.replace_contents(
+                new TextEncoder().encode(
+                    `file:///home Home\n${uri} Renamed\nfile:///tmp\n`),
+                null, false, Gio.FileCreateFlags.NONE, null);
+
+            localPlugin.toggleBookmark();
+
+            expect(read()).toBe('file:///home Home\nfile:///tmp\n');
+            expect(localPlugin.isBookmarked()).toBeFalse();
+        });
+
+        it('keeps other bookmarks when adding', function () {
+            localPlugin.toggleBookmark();
+
+            const uri = localPlugin._getBookmarkUri();
+
+            expect(read()).toBe(
+                `file:///home Home\nfile:///tmp\n${uri} ${localPlugin.device.name}\n`);
+        });
+
+        it('follows the device when it is renamed', function () {
+            const device = localPlugin.device;
+            const oldName = device.name;
+            const oldUri = localPlugin._getBookmarkUri();
+
+            device.settings.set_string('name', 'Renamed Phone');
+            device.notify('name');
+
+            const uri = localPlugin._getBookmarkUri();
+
+            expect(uri).not.toBe(oldUri);
+            expect(read()).toBe(
+                `file:///home Home\nfile:///tmp\n${uri} Renamed Phone\n`);
+            expect(localPlugin.isBookmarked()).toBeTrue();
+
+            // A label the user chose is kept
+            bookmarksFile.replace_contents(
+                new TextEncoder().encode(`${uri} My Files\n`),
+                null, false, Gio.FileCreateFlags.NONE, null);
+            device.settings.set_string('name', oldName);
+            device.notify('name');
+
+            expect(read()).toBe(`${oldUri} My Files\n`);
+        });
     });
 
     it('enables its GActions when connected', function () {

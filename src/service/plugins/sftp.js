@@ -74,6 +74,17 @@ const SFTPPlugin = GObject.registerClass({
             'mount-removed',
             this._onMountRemoved.bind(this)
         );
+
+        // Bookmark the mounted files in the Files sidebar, from the "Files"
+        // submenu. It's not a plugin action, so it has no keyboard shortcut.
+        this._bookmarkAction = new Gio.SimpleAction({name: 'toggleBookmark'});
+        this._bookmarkAction.connect('activate', this.toggleBookmark.bind(this));
+        this.device.add_action(this._bookmarkAction);
+
+        // The device can be renamed, in KDE Connect on the device
+        this._linkName = this.device.name;
+        this._nameChangedId = this.device.connect('notify::name',
+            this._onNameChanged.bind(this));
     }
 
     get gmount() {
@@ -349,7 +360,9 @@ const SFTPPlugin = GObject.registerClass({
             // Files submenu
             const filesSubmenu = new Gio.Menu();
             filesSubmenu.append_section(null, dirSection);
+            filesSubmenu.append_section(null, this._getBookmarkSection());
             filesSubmenu.append_section(null, unmountSection);
+            this._watchBookmarks();
 
             // Files menu item
             const filesMenuItem = this._getFilesMenuItem();
@@ -368,6 +381,8 @@ const SFTPPlugin = GObject.registerClass({
     }
 
     _removeSubmenu() {
+        this._unwatchBookmarks();
+
         try {
             const index = this.device.removeMenuAction('device.mount');
             const action = this.device.lookup_action('mount');
@@ -383,6 +398,229 @@ const SFTPPlugin = GObject.registerClass({
         } catch (e) {
             logError(e, this.device.name);
         }
+    }
+
+    /*
+     * Files bookmark helpers
+     */
+    get bookmarksFile() {
+        // GTK 3 and 4 file choosers and Files all use this file
+        if (this._bookmarksFile === undefined) {
+            this._bookmarksFile = Gio.File.new_for_path(GLib.build_filenamev([
+                GLib.get_user_config_dir(),
+                'gtk-3.0',
+                'bookmarks',
+            ]));
+        }
+
+        return this._bookmarksFile;
+    }
+
+    set bookmarksFile(file) {
+        this._bookmarksFile = file;
+    }
+
+    /**
+     * Get the path of the symbolic link referring to the device by name,
+     * which stays the same when its IP address changes.
+     *
+     * @param {string} [name] - A device name, the current one by default
+     * @returns {string} An absolute path
+     */
+    _getSymlinkPath(name = this.device.name) {
+        // Replace path separator with a Unicode lookalike:
+        let safe_device_name = name.replace('/', '∕');
+
+        if (safe_device_name === '.')
+            safe_device_name = '·';
+        else if (safe_device_name === '..')
+            safe_device_name = '··';
+
+        return `${Config.RUNTIMEDIR}/by-name/${safe_device_name}`;
+    }
+
+    _getBookmarkUri(name = this.device.name) {
+        return Gio.File.new_for_path(this._getSymlinkPath(name)).get_uri();
+    }
+
+    /**
+     * Read the bookmarks file as a list of lines, each a URI followed by an
+     * optional label.
+     *
+     * @returns {string[]} The lines, without empty ones
+     */
+    _readBookmarks() {
+        try {
+            const [, contents] = this.bookmarksFile.load_contents(null);
+
+            return new TextDecoder().decode(contents)
+                .split('\n')
+                .filter(line => line.trim() !== '');
+        } catch (e) {
+            if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND))
+                debug(e, this.device.name);
+
+            return [];
+        }
+    }
+
+    _isBookmark(line, uri) {
+        return line.split(' ', 1)[0] === uri;
+    }
+
+    /**
+     * Whether the device's files are bookmarked in the Files sidebar.
+     *
+     * @returns {boolean} %true if bookmarked
+     */
+    isBookmarked() {
+        const uri = this._getBookmarkUri();
+
+        return this._readBookmarks().some(line => this._isBookmark(line, uri));
+    }
+
+    /**
+     * Add the device's files to the Files sidebar, or remove them from it.
+     * The bookmark refers to the device by name, so it keeps working when the
+     * device's IP address changes, and shows as unavailable while unmounted.
+     */
+    toggleBookmark() {
+        try {
+            const uri = this._getBookmarkUri();
+            let lines = this._readBookmarks();
+
+            if (lines.some(line => this._isBookmark(line, uri)))
+                lines = lines.filter(line => !this._isBookmark(line, uri));
+            else
+                lines.push(`${uri} ${this.device.name}`);
+
+            this._writeBookmarks(lines);
+        } catch (e) {
+            logError(e, this.device.name);
+        }
+
+        this._updateBookmarkSection();
+    }
+
+    _writeBookmarks(lines) {
+        try {
+            this.bookmarksFile.get_parent().make_directory_with_parents(null);
+        } catch (e) {
+            if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.EXISTS))
+                throw e;
+        }
+
+        const contents = lines.length ? `${lines.join('\n')}\n` : '';
+        this.bookmarksFile.replace_contents(
+            new TextEncoder().encode(contents),
+            null,
+            false,
+            Gio.FileCreateFlags.NONE,
+            null);
+    }
+
+    /**
+     * Move the link and the bookmark to the device's new name, keeping a
+     * label the user gave the bookmark.
+     */
+    _onNameChanged() {
+        const oldName = this._linkName;
+        const newName = this.device.name;
+
+        if (oldName === newName)
+            return;
+
+        this._linkName = newName;
+
+        try {
+            const oldUri = this._getBookmarkUri(oldName);
+            const newUri = this._getBookmarkUri(newName);
+            let changed = false;
+
+            const lines = this._readBookmarks().map(line => {
+                if (!this._isBookmark(line, oldUri))
+                    return line;
+
+                changed = true;
+                const label = line.slice(oldUri.length + 1);
+
+                if (label === '')
+                    return newUri;
+
+                return `${newUri} ${label === oldName ? newName : label}`;
+            });
+
+            if (changed)
+                this._writeBookmarks(lines);
+        } catch (e) {
+            logError(e, this.device.name);
+        }
+
+        // Replace the old link, which isn't updated anymore
+        try {
+            Gio.File.new_for_path(this._getSymlinkPath(oldName)).delete(null);
+        } catch (e) {
+            if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND))
+                debug(e, this.device.name);
+        }
+
+        if (this._gmount !== null)
+            this._addSymlink(this._gmount);
+
+        this._updateBookmarkSection();
+    }
+
+    _getBookmarkSection() {
+        if (this._bookmarkSection === undefined)
+            this._bookmarkSection = new Gio.Menu();
+
+        this._updateBookmarkSection();
+
+        return this._bookmarkSection;
+    }
+
+    _updateBookmarkSection() {
+        if (this._bookmarkSection === undefined)
+            return;
+
+        // The same labels as in Files
+        const label = this.isBookmarked()
+            ? _('Remove from Bookmarks')
+            : _('Add to Bookmarks');
+
+        if (this._bookmarkSection.get_n_items() === 1 &&
+            this._bookmarkLabel === label)
+            return;
+
+        this._bookmarkLabel = label;
+        this._bookmarkSection.remove_all();
+        this._bookmarkSection.append(label, 'device.toggleBookmark');
+    }
+
+    /**
+     * Keep the bookmark item up to date while the files are mounted, since
+     * the bookmark can also be removed or added in Files.
+     */
+    _watchBookmarks() {
+        if (this._bookmarksMonitor !== undefined)
+            return;
+
+        try {
+            this._bookmarksMonitor = this.bookmarksFile.monitor_file(
+                Gio.FileMonitorFlags.WATCH_MOVES, null);
+            this._bookmarksMonitor.connect('changed',
+                () => this._updateBookmarkSection());
+        } catch (e) {
+            debug(e, this.device.name);
+        }
+    }
+
+    _unwatchBookmarks() {
+        if (this._bookmarksMonitor === undefined)
+            return;
+
+        this._bookmarksMonitor.cancel();
+        this._bookmarksMonitor = undefined;
     }
 
     /**
@@ -403,17 +641,8 @@ const SFTPPlugin = GObject.registerClass({
                     throw e;
             }
 
-            // Replace path separator with a Unicode lookalike:
-            let safe_device_name = this.device.name.replace('/', '∕');
-
-            if (safe_device_name === '.')
-                safe_device_name = '·';
-            else if (safe_device_name === '..')
-                safe_device_name = '··';
-
             const link_target = mount.get_root().get_path();
-            const link = Gio.File.new_for_path(
-                `${by_name_dir.get_path()}/${safe_device_name}`);
+            const link = Gio.File.new_for_path(this._getSymlinkPath());
 
             // Check for and remove any existing stale link
             try {
@@ -475,6 +704,10 @@ const SFTPPlugin = GObject.registerClass({
     }
 
     destroy() {
+        this._unwatchBookmarks();
+        this.device.remove_action('toggleBookmark');
+        this.device.disconnect(this._nameChangedId);
+
         if (this._volumeMonitor) {
             this._volumeMonitor.disconnect(this._mountAddedId);
             this._volumeMonitor.disconnect(this._mountRemovedId);
