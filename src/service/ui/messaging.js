@@ -27,6 +27,12 @@ const TIME_SPAN_DAY = 86400000;
 const TIME_SPAN_WEEK = 604800000;
 
 
+/**
+ * How many messages to add to a conversation at a time when loading it.
+ */
+const MESSAGE_BATCH = 20;
+
+
 // Less than an hour (eg. 42 minutes ago)
 const _lthLong = new Intl.RelativeTimeFormat('default', {
     numeric: 'auto',
@@ -461,17 +467,16 @@ const Conversation = GObject.registerClass({
         conversation.device.disconnect(conversation._connectedId);
         conversation._vadj.disconnect(conversation._scrolledId);
 
-        conversation.list.foreach(message => {
-            // HACK: temporary mitigator for mysterious GtkListBox leak
-            message.destroy();
-            system.gc();
-        });
+        conversation.list.foreach(message => message.destroy());
+
+        // HACK: temporary mitigator for mysterious GtkListBox leak
+        system.gc();
     }
 
     _onEdgeReached(scrolled_window, pos) {
         // Try to load more messages
         if (pos === Gtk.PositionType.TOP)
-            this.logPrevious();
+            this.logPrevious(MESSAGE_BATCH);
 
         // Release any hold to resume auto-scrolling
         else if (pos === Gtk.PositionType.BOTTOM)
@@ -530,9 +535,9 @@ const Conversation = GObject.registerClass({
         const upper = this._vadj.get_upper();
         const pageSize = this._vadj.get_page_size();
 
-        // If the scrolled window hasn't been filled yet, load another message
+        // If the scrolled window hasn't been filled yet, load more messages
         if (upper <= pageSize) {
-            this.logPrevious();
+            this.logPrevious(MESSAGE_BATCH);
             this.scrolled.get_child().check_resize();
 
         // We've been asked to hold the position, so we'll reset the adjustment
@@ -579,7 +584,7 @@ const Conversation = GObject.registerClass({
         // Make a copy of the thread and fill the window with messages
         if (this.plugin.threads[this.thread_id]) {
             this.__messages = this.plugin.threads[this.thread_id].slice(0);
-            this.logPrevious();
+            this.logPrevious(MESSAGE_BATCH);
         }
     }
 
@@ -684,26 +689,74 @@ const Conversation = GObject.registerClass({
     }
 
     /**
-     * Log the previous message in the thread
+     * Log previous messages in the thread, requesting older ones from the
+     * device when all the cached ones are shown.
+     *
+     * @param {number} [count] - The number of messages to log
      */
-    logPrevious() {
-        try {
+    logPrevious(count = 1) {
+        let logged = 0;
+
+        while (logged < count) {
             const message = this.__messages.pop();
 
-            if (!message)
-                return;
+            if (!message) {
+                if (this.thread_id !== null &&
+                    this.plugin.requestOlderMessages(this.thread_id))
+                    this._waitingForOlder = true;
+
+                break;
+            }
 
             // TODO: Unsupported MessageBox
             if (message.type !== Sms.MessageBox.INBOX &&
-                message.type !== Sms.MessageBox.SENT)
-                throw TypeError(`invalid message box ${message.type}`);
+                message.type !== Sms.MessageBox.SENT) {
+                debug(`invalid message box ${message.type}`);
+                continue;
+            }
 
             // Prepend the message
             const row = this._createMessageRow(message);
             this.list.prepend(row);
+            logged++;
+        }
+
+        if (logged > 0)
             this.list.invalidate_headers();
-        } catch (e) {
-            debug(e);
+    }
+
+    /**
+     * Add messages older than the newest one, received from the device. Those
+     * among the messages shown, which were missed while disconnected, are
+     * shown now and the rest when scrolled back to.
+     *
+     * @param {object[]} messages - Message objects
+     */
+    addOlderMessages(messages) {
+        const rows = this.list.get_children().filter(row => {
+            return row.message !== undefined && row.get_name() !== 'pending';
+        });
+        const oldest = Math.min(...rows.map(row => row.message.date));
+        const missed = messages.filter(message => message.date > oldest);
+
+        for (const message of missed) {
+            if (message.type === Sms.MessageBox.INBOX ||
+                message.type === Sms.MessageBox.SENT)
+                this.list.add(this._createMessageRow(message));
+        }
+
+        if (missed.length > 0)
+            this.list.invalidate_headers();
+
+        this.__messages = [
+            ...messages.filter(message => message.date <= oldest),
+            ...this.__messages,
+        ].sort((a, b) => a.date - b.date);
+
+        // Show them if the conversation was waiting for them
+        if (this._waitingForOlder) {
+            this._waitingForOlder = false;
+            this.logPrevious(MESSAGE_BATCH);
         }
     }
 
@@ -944,6 +997,8 @@ export const Window = GObject.registerClass({
             this._pendingShare = null;
         }
 
+        this.plugin.refreshConversation(thread_id);
+
         this._thread_id = thread_id;
         this.notify('thread_id');
     }
@@ -969,7 +1024,7 @@ export const Window = GObject.registerClass({
 
     _sync() {
         this.device.contacts.fetch();
-        this.plugin.connected();
+        this.plugin.requestConversations();
     }
 
     _onNewConversation() {
@@ -1005,6 +1060,8 @@ export const Window = GObject.registerClass({
         }
 
         // Update existing summaries and destroy old ones
+        let destroyed = false;
+
         for (const row of this.thread_list.get_children()) {
             const message = messages[row.thread_id];
 
@@ -1027,17 +1084,18 @@ export const Window = GObject.registerClass({
                 // Destroy the conversation widget
                 const conversation = this.stack.get_child_by_name(`${row.thread_id}`);
 
-                if (conversation) {
+                if (conversation)
                     conversation.destroy();
-                    system.gc();
-                }
 
                 // Then the summary widget
                 row.destroy();
-                // HACK: temporary mitigator for mysterious GtkListBox leak
-                system.gc();
+                destroyed = true;
             }
         }
+
+        // HACK: temporary mitigator for mysterious GtkListBox leak
+        if (destroyed)
+            system.gc();
 
         // What's left in the dictionary is new summaries
         for (const message of Object.values(messages)) {

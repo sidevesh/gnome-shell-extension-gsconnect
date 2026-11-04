@@ -2,147 +2,96 @@
 //
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import GLib from 'gi://GLib';
+
 import * as Utils from '../fixtures/utils.js';
 
 
-const Packets = {
-    summary: {
-        type: 'kdeconnect.sms.messages',
-        body: {
-            messages: [
-                {
-                    addresses: [
-                        {
-                            address: '555-555-5555',
-                        },
-                    ],
-                    body: 'incoming message of thread 1',
-                    date: 1588334621800,
-                    type: 1,
-                    read: 0,
-                    thread_id: 1,
-                    _id: 1,
-                    sub_id: 1,
-                    event: 1,
-                },
-                {
-                    addresses: [
-                        {
-                            address: '555-555-5556',
-                        },
-                    ],
-                    body: 'incoming message of thread 2',
-                    date: 1588334621500,
-                    type: 1,
-                    read: 0,
-                    thread_id: 2,
-                    _id: 3,
-                    sub_id: 1,
-                    event: 1,
-                },
-            ],
-            version: 2,
-        },
-    },
-    thread_one: {
-        type: 'kdeconnect.sms.messages',
-        body: {
-            messages: [
-                {
-                    addresses: [
-                        {
-                            address: '555-555-5555',
-                        },
-                    ],
-                    body: 'incoming message of thread 1',
-                    date: 1588334621800,
-                    type: 1,
-                    read: 0,
-                    thread_id: 1,
-                    _id: 1,
-                    sub_id: 1,
-                    event: 1,
-                },
-                {
-                    addresses: [
-                        {
-                            address: '555-555-5555',
-                        },
-                    ],
-                    body: 'outgoing message of thread 1',
-                    date: 1588334621700,
-                    type: 2,
-                    read: 0,
-                    thread_id: 1,
-                    _id: 2,
-                    sub_id: 1,
-                    event: 1,
-                },
-            ],
-            version: 2,
-        },
-    },
-    thread_two: {
-        type: 'kdeconnect.sms.messages',
-        body: {
-            messages: [
-                {
-                    addresses: [
-                        {
-                            address: '555-555-5556',
-                        },
-                    ],
-                    body: 'incoming message of thread 2',
-                    date: 1588334621500,
-                    type: 1,
-                    read: 0,
-                    thread_id: 2,
-                    _id: 3,
-                    sub_id: 1,
-                    event: 1,
-                },
-                {
-                    addresses: [
-                        {
-                            address: '555-555-5556',
-                        },
-                    ],
-                    body: 'outgoing message of thread 2',
-                    date: 1588334621400,
-                    type: 2,
-                    read: 0,
-                    thread_id: 2,
-                    _id: 4,
-                    sub_id: 1,
-                    event: 1,
-                },
-            ],
-            version: 2,
-        },
-    },
-};
+const SMS_CAPABILITIES = [
+    'kdeconnect.sms.messages',
+    'kdeconnect.sms.request',
+    'kdeconnect.sms.request_conversation',
+    'kdeconnect.sms.request_conversations',
+];
+
+const BASE_DATE = 1588334621000;
 
 
 /**
- * Mocked packet handling for the test device
+ * Create a message object as KDE Connect for Android sends them.
  *
- * @param {object} packet - a KDE Connect protocol packet
+ * @param {number} thread_id - The thread ID
+ * @param {number} n - The message's position in the thread
+ * @returns {object} A message object
  */
-function handlePacket(packet) {
-    switch (packet.type) {
-        case 'kdeconnect.sms.request_conversations':
-            this.sendPacket(Packets.summary);
-            break;
+function createMessage(thread_id, n) {
+    return {
+        addresses: [{address: `555-555-000${thread_id}`}],
+        body: `message ${n} of thread ${thread_id}`,
+        date: BASE_DATE + thread_id * 100000 + n * 10,
+        type: n % 2 ? 2 : 1,
+        read: 1,
+        thread_id: thread_id,
+        _id: thread_id * 1000 + n,
+        sub_id: 1,
+        event: 1,
+    };
+}
 
-        case 'kdeconnect.sms.request_conversation':
-            if (packet.body.threadID === '1')
-                this.sendPacket(Packets.thread_one);
 
-            else if (packet.body.threadID === '2')
-                this.sendPacket(Packets.thread_two);
-
-            break;
+/**
+ * A fake phone, answering requests like KDE Connect for Android does.
+ */
+class FakePhone {
+    constructor(device) {
+        this.device = device;
+        this.threads = new Map([
+            [1, [createMessage(1, 0), createMessage(1, 1)]],
+            [2, [createMessage(2, 0)]],
+            [3, Array.from({length: 120}, (_, n) => createMessage(3, n))],
+        ]);
     }
+
+    send(messages) {
+        this.device.sendPacket({
+            type: 'kdeconnect.sms.messages',
+            body: {messages: messages, version: 2},
+        });
+    }
+
+    handlePacket(packet) {
+        switch (packet.type) {
+            // One packet for each conversation, with its latest message
+            case 'kdeconnect.sms.request_conversations':
+                for (const messages of this.threads.values())
+                    this.send([messages[messages.length - 1]]);
+                break;
+
+            // The newest messages at or before the start, up to the number
+            case 'kdeconnect.sms.request_conversation': {
+                const messages = this.threads.get(Number(packet.body.threadID)) ?? [];
+                const start = packet.body.rangeStartTimestamp ?? Infinity;
+                const number = packet.body.numberToRequest ?? messages.length;
+
+                this.send(messages
+                    .filter(message => message.date <= start)
+                    .sort((a, b) => b.date - a.date)
+                    .slice(0, number));
+                break;
+            }
+        }
+    }
+}
+
+
+/**
+ * Iterate the main loop until a condition is met.
+ *
+ * @param {() => boolean} condition - Returns true when done waiting
+ */
+async function waitFor(condition) {
+    while (!condition())
+        await Promise.idle(GLib.PRIORITY_DEFAULT_IDLE);
 }
 
 
@@ -150,43 +99,69 @@ describe('The sms plugin', function () {
     let testRig;
     let localPlugin;
     let remoteDevice;
+    let phone;
+
+    /**
+     * Request the conversation list and wait for it to arrive.
+     */
+    async function listConversations() {
+        localPlugin.requestConversations();
+
+        await waitFor(() => {
+            return [...phone.threads].every(([id, messages]) => {
+                const thread = localPlugin.threads[`${id}`];
+                const latest = messages[messages.length - 1];
+
+                return thread?.some(message => message.date === latest.date);
+            });
+        });
+
+        // Let the last replies through
+        for (let i = 0; i < 5; i++)
+            await Promise.idle(GLib.PRIORITY_DEFAULT_IDLE);
+
+        localPlugin._endList();
+    }
+
+    /**
+     * Request the latest messages of conversations and wait for them.
+     *
+     * @param {...string} ids - Thread IDs
+     */
+    async function openConversations(...ids) {
+        for (const id of ids)
+            localPlugin.refreshConversation(id);
+
+        await waitFor(() => localPlugin._pendingThreads.size === 0);
+    }
+
+    /**
+     * Get the IDs of the cached messages of a conversation.
+     *
+     * @param {string} thread_id - The thread ID
+     * @returns {number[]} The message IDs
+     */
+    function messageIds(thread_id) {
+        return localPlugin.threads[thread_id].map(message => message._id);
+    }
 
     beforeAll(async function () {
         testRig = new Utils.TestRig();
         await testRig.prepare({
             localDevice: {
-                incomingCapabilities: [
-                    'kdeconnect.sms.messages',
-                    'kdeconnect.sms.request',
-                    'kdeconnect.sms.request_conversation',
-                    'kdeconnect.sms.request_conversations',
-                ],
-                outgoingCapabilities: [
-                    'kdeconnect.sms.messages',
-                    'kdeconnect.sms.request',
-                    'kdeconnect.sms.request_conversation',
-                    'kdeconnect.sms.request_conversations',
-                ],
+                incomingCapabilities: SMS_CAPABILITIES,
+                outgoingCapabilities: SMS_CAPABILITIES,
             },
             remoteDevice: {
-                incomingCapabilities: [
-                    'kdeconnect.sms.messages',
-                    'kdeconnect.sms.request',
-                    'kdeconnect.sms.request_conversation',
-                    'kdeconnect.sms.request_conversations',
-                ],
-                outgoingCapabilities: [
-                    'kdeconnect.sms.messages',
-                    'kdeconnect.sms.request',
-                    'kdeconnect.sms.request_conversation',
-                    'kdeconnect.sms.request_conversations',
-                ],
+                incomingCapabilities: SMS_CAPABILITIES,
+                outgoingCapabilities: SMS_CAPABILITIES,
             },
         });
         testRig.setPaired(true);
 
         remoteDevice = testRig.remoteDevice;
-        remoteDevice.handlePacket = handlePacket.bind(remoteDevice);
+        phone = new FakePhone(remoteDevice);
+        remoteDevice.handlePacket = phone.handlePacket.bind(phone);
     });
 
     afterAll(function () {
@@ -194,8 +169,10 @@ describe('The sms plugin', function () {
     });
 
     beforeEach(function () {
-        if (localPlugin)
+        if (localPlugin) {
             spyOn(localPlugin, 'handlePacket').and.callThrough();
+            spyOn(remoteDevice, 'handlePacket').and.callThrough();
+        }
     });
 
     it('can be loaded', async function () {
@@ -207,63 +184,188 @@ describe('The sms plugin', function () {
     });
 
     it('enables its GActions when connected', function () {
-        spyOn(localPlugin, '_requestConversations');
-
         testRig.setConnected(true);
 
         for (const action in localPlugin._meta.actions)
             expect(localPlugin.device.get_action_enabled(action)).toBeTrue();
     });
 
-    it('requests messages when connected', function () {
-        spyOn(localPlugin, '_requestConversations');
+    it('does not request messages when connected', function () {
+        spyOn(localPlugin, 'requestConversations');
 
         localPlugin.connected();
-        expect(localPlugin._requestConversations).toHaveBeenCalled();
+        expect(localPlugin.requestConversations).not.toHaveBeenCalled();
     });
 
-    it('can request a list of conversations', async function () {
-        spyOn(localPlugin, '_handleDigest');
+    it('requests the conversations when connected with the window open', function () {
+        spyOn(localPlugin, 'requestConversations');
 
-        localPlugin._requestConversations();
+        localPlugin._window = {getConversationForMessage: () => null};
+        localPlugin.connected();
+        localPlugin._window = undefined;
 
-        await localPlugin.awaitPacket('kdeconnect.sms.messages');
-        expect(localPlugin._handleDigest).toHaveBeenCalled();
+        expect(localPlugin.requestConversations).toHaveBeenCalled();
     });
 
-    it('can request full conversations', async function () {
-        spyOn(localPlugin, '_handleDigest').and.callThrough();
-        spyOn(localPlugin, '_handleThread').and.callThrough();
-        spyOn(localPlugin, '_requestConversation').and.callThrough();
+    it('lists conversations without requesting them', async function () {
+        await listConversations();
 
-        localPlugin._requestConversations();
+        expect(remoteDevice.handlePacket).toHaveBeenCalledTimes(1);
+        expect(remoteDevice.handlePacket).not.toHaveBeenCalledWith(
+            jasmine.objectContaining({
+                type: 'kdeconnect.sms.request_conversation',
+            }));
 
-        await localPlugin.awaitPacket('kdeconnect.sms.messages');
-        expect(localPlugin._handleDigest).toHaveBeenCalled();
-        expect(localPlugin._requestConversation).toHaveBeenCalledTimes(2);
-
-        localPlugin.handlePacket.calls.reset();
-
-        await localPlugin.awaitPacket('kdeconnect.sms.messages');
-        expect(localPlugin._handleThread).toHaveBeenCalled();
+        expect(messageIds('1')).toEqual([1001]);
+        expect(messageIds('2')).toEqual([2000]);
+        expect(messageIds('3')).toEqual([3119]);
     });
 
-    it('only requests new or updated converations', async function () {
-        spyOn(localPlugin, '_handleDigest').and.callThrough();
-        spyOn(localPlugin, '_handleThread').and.callThrough();
-        spyOn(localPlugin, '_requestConversation').and.callThrough();
+    it('does not request the list again while it arrives', async function () {
+        localPlugin.requestConversations();
+        localPlugin.requestConversations();
 
-        localPlugin._requestConversations();
+        await waitFor(() => remoteDevice.handlePacket.calls.count() > 0);
+        for (let i = 0; i < 5; i++)
+            await Promise.idle(GLib.PRIORITY_DEFAULT_IDLE);
+        localPlugin._endList();
 
-        await localPlugin.awaitPacket('kdeconnect.sms.messages');
-        expect(localPlugin._handleDigest).toHaveBeenCalled();
+        const lists = remoteDevice.handlePacket.calls.allArgs().filter(([packet]) => {
+            return packet.type === 'kdeconnect.sms.request_conversations';
+        });
+        expect(lists.length).toBe(1);
+    });
 
-        expect(localPlugin._requestConversation).not.toHaveBeenCalled();
+    it('requests the latest messages of an opened conversation', async function () {
+        await openConversations('1', '3');
+
+        for (const id of ['1', '3']) {
+            expect(remoteDevice.handlePacket).toHaveBeenCalledWith(
+                jasmine.objectContaining({
+                    type: 'kdeconnect.sms.request_conversation',
+                    body: {threadID: id, numberToRequest: 50},
+                }));
+        }
+
+        expect(messageIds('1')).toEqual([1000, 1001]);
+
+        // Only the latest page of a long conversation, in order
+        const thread = localPlugin.threads['3'];
+        expect(thread.length).toBe(50);
+        expect(thread[0].body).toBe('message 70 of thread 3');
+        expect(thread[49].body).toBe('message 119 of thread 3');
+    });
+
+    it('gets the messages a list skips when the conversation is opened', async function () {
+        phone.threads.get(1).push(createMessage(1, 2), createMessage(1, 3));
+
+        await listConversations();
+        expect(messageIds('1')).toEqual([1000, 1001, 1003]);
+
+        await openConversations('1');
+        expect(messageIds('1')).toEqual([1000, 1001, 1002, 1003]);
+    });
+
+    it('requests older messages a page at a time', async function () {
+        const plugin = localPlugin;
+
+        while (plugin.requestOlderMessages('3')) {
+            const length = plugin.threads['3'].length;
+
+            await waitFor(() => {
+                return !plugin._pendingOlderThreads.has('3') &&
+                    plugin.threads['3'].length >= length;
+            });
+        }
+
+        const thread = localPlugin.threads['3'];
+        expect(thread.length).toBe(120);
+        expect(thread[0].body).toBe('message 0 of thread 3');
+        expect(localPlugin._completeThreads.has('3')).toBeTrue();
+
+        // The first request started at the oldest message it had
+        expect(remoteDevice.handlePacket).toHaveBeenCalledWith(
+            jasmine.objectContaining({
+                type: 'kdeconnect.sms.request_conversation',
+                body: {
+                    threadID: '3',
+                    rangeStartTimestamp: createMessage(3, 70).date,
+                    numberToRequest: 50,
+                },
+            }));
+    });
+
+    it('keeps conversations a list leaves out', async function () {
+        const thread = phone.threads.get(2);
+        phone.threads.delete(2);
+
+        await listConversations();
+        phone.threads.set(2, thread);
+
+        expect(localPlugin.threads['2']).toBeDefined();
+    });
+
+    it('takes an empty list as a reply only if none arrives', async function () {
+        localPlugin._emptyReplyTime = 0;
+
+        // An empty list the device sent because a message was read
+        localPlugin.refreshConversation('1');
+        localPlugin.handlePacket({
+            type: 'kdeconnect.sms.messages',
+            body: {messages: []},
+        });
+
+        await waitFor(() => localPlugin._pendingThreads.size === 0);
+        for (let i = 0; i < 5; i++)
+            await Promise.idle(GLib.PRIORITY_DEFAULT_IDLE);
+
+        expect(localPlugin.threads['1']).toBeDefined();
+        expect(localPlugin._emptyReplyId).toBe(0);
+    });
+
+    it('forgets requests when disconnected', function () {
+        localPlugin._pendingThreads.set('1', 0);
+        localPlugin._pendingOlderThreads.set('3', 0);
+        localPlugin._listArriving = true;
+
+        localPlugin.disconnected();
+
+        expect(localPlugin._pendingThreads.size).toBe(0);
+        expect(localPlugin._pendingOlderThreads.size).toBe(0);
+        expect(localPlugin._listArriving).toBeFalse();
+
+        testRig.setConnected(true);
+    });
+
+    it('notifies and saves once for a burst of messages', async function () {
+        spyOn(localPlugin, 'notify').and.callThrough();
+        spyOn(localPlugin, 'saveCache');
+
+        phone.threads.set(4, [createMessage(4, 0)]);
+        phone.threads.set(5, [createMessage(5, 0)]);
+        await listConversations();
+
+        const notifies = localPlugin.notify.calls.allArgs()
+            .filter(([name]) => name === 'threads');
+        const packets = localPlugin.handlePacket.calls.count();
+
+        expect(notifies.length).toBeGreaterThan(0);
+        expect(notifies.length).toBeLessThan(packets);
+        expect(localPlugin.saveCache).toHaveBeenCalled();
+    });
+
+    it('still accepts a conversation list in a single packet', async function () {
+        localPlugin.handlePacket({
+            type: 'kdeconnect.sms.messages',
+            body: {
+                messages: [createMessage(6, 0), createMessage(7, 0)],
+            },
+        });
+
+        await waitFor(() => localPlugin.threads['6'] && localPlugin.threads['7']);
     });
 
     it('can send SMS messages', async function () {
-        spyOn(remoteDevice, 'handlePacket').and.callThrough();
-
         localPlugin.sendSms('555-555-5555', 'message body');
 
         await remoteDevice.awaitPacket('kdeconnect.sms.request', {
