@@ -761,6 +761,26 @@ const Conversation = GObject.registerClass({
     }
 
     /**
+     * Remove messages that were deleted on the device.
+     *
+     * @param {object[]} messages - Message objects
+     */
+    removeMessages(messages) {
+        const dates = new Set(messages.map(message => message.date));
+
+        this.__messages = this.__messages.filter(message => {
+            return !dates.has(message.date);
+        });
+
+        for (const row of this.list.get_children()) {
+            if (row.message !== undefined && dates.has(row.message.date))
+                row.destroy();
+        }
+
+        this.list.invalidate_headers();
+    }
+
+    /**
      * Set the contents of the message entry
      *
      * @param {string} text - The message to place in the entry
@@ -1025,6 +1045,16 @@ export const Window = GObject.registerClass({
     _sync() {
         this.device.contacts.fetch();
         this.plugin.requestConversations();
+    }
+
+    /**
+     * Leave a conversation that was deleted on the device.
+     *
+     * @param {string} thread_id - The thread ID
+     */
+    removeConversation(thread_id) {
+        if (this.thread_id === `${thread_id}`)
+            this.thread_id = '';
     }
 
     _onNewConversation() {

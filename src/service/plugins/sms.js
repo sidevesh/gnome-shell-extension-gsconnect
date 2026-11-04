@@ -178,7 +178,13 @@ const SMSPlugin = GObject.registerClass({
         this._completeThreads = new Set();
         this._requestCount = 0;
 
-        // Waiting to take an empty list from the device as a reply
+        // Messages received while the latest messages of a conversation are
+        // requested, by thread, which the requested page may not include
+        this._receivedWhilePending = new Map();
+
+        // Conversations the device sent no messages for, which are asked for
+        // again before they are taken to be deleted
+        this._emptyThreads = new Set();
         this._emptyReplyId = 0;
         this._emptyReplyThread = null;
         this._emptyReplyTime = EMPTY_REPLY_TIME;
@@ -247,6 +253,7 @@ const SMSPlugin = GObject.registerClass({
         // Requests that were waiting for a reply won't get one
         this._pendingThreads.clear();
         this._pendingOlderThreads.clear();
+        this._receivedWhilePending.clear();
         this._cancelEmptyReply();
         this._endList();
     }
@@ -406,13 +413,33 @@ const SMSPlugin = GObject.registerClass({
     _handleThreadMessages(thread_id, messages) {
         const requested = this._pendingThreads.delete(thread_id);
         const requestedOlder = this._pendingOlderThreads.delete(thread_id);
+        const olderStart = requestedOlder
+            ? this.threads[thread_id]?.[0]?.date
+            : undefined;
         const added = this._addMessages(thread_id, messages);
 
         // The request an empty list was taken for was answered
         if ((requested || requestedOlder) && this._emptyReplyThread === thread_id)
             this._cancelEmptyReply();
 
-        if (!requested && !requestedOlder)
+        // The device doesn't tell us about deleted messages, so look for
+        // the ones missing from the pages we asked for
+        if (requested) {
+            this._removeDeletedMessages(thread_id, messages);
+            this._receivedWhilePending.delete(thread_id);
+        } else if (requestedOlder && olderStart !== undefined) {
+            this._removeDeletedMessages(thread_id, messages, olderStart);
+        } else if (this._pendingThreads.has(thread_id)) {
+            if (!this._receivedWhilePending.has(thread_id))
+                this._receivedWhilePending.set(thread_id, new Set());
+
+            for (const message of messages)
+                this._receivedWhilePending.get(thread_id).add(message.date);
+        }
+
+        if (requested)
+            this._emptyThreads.delete(thread_id);
+        else if (!requestedOlder)
             this._listActivity = true;
 
         // A page of older messages; a short one means there are no more. The
@@ -476,8 +503,99 @@ const SMSPlugin = GObject.registerClass({
         pending.delete(thread_id);
 
         // No older messages are left
-        if (older)
+        if (older) {
             this._completeThreads.add(thread_id);
+            return;
+        }
+
+        // A conversation with no messages was deleted. Ask once more first,
+        // in case the empty list was sent for another reason.
+        if (!this._emptyThreads.has(thread_id)) {
+            this._emptyThreads.add(thread_id);
+            this._requestConversation(thread_id);
+            return;
+        }
+
+        this._emptyThreads.delete(thread_id);
+        this._removeThread(thread_id);
+    }
+
+    /**
+     * Remove a conversation that was deleted on the device.
+     *
+     * @param {string} thread_id - The thread ID
+     */
+    _removeThread(thread_id) {
+        if (this.threads[thread_id] === undefined)
+            return;
+
+        delete this.threads[thread_id];
+        this._completeThreads.delete(thread_id);
+        this._threadsChanged();
+
+        this._window?.removeConversation?.(thread_id);
+    }
+
+    /**
+     * Remove the messages of a conversation that were deleted on the device.
+     *
+     * KDE Connect doesn't report deleted messages, so this compares a page of
+     * messages the device sent when asked with the cached ones it should
+     * include: the latest page has every message from its oldest one on, and
+     * a page of older messages every message from its oldest one up to where
+     * it started. A page with fewer messages than asked for reaches the start
+     * of the conversation.
+     *
+     * @param {string} thread_id - The thread ID
+     * @param {object[]} messages - The page of messages
+     * @param {number} [start] - The date a page of older messages started at
+     */
+    _removeDeletedMessages(thread_id, messages, start = undefined) {
+        const cache = this.threads[thread_id];
+
+        if (!Array.isArray(cache) || messages.length === 0)
+            return;
+
+        const dates = new Set(messages.map(message => message.date));
+        const newest = Math.max(...dates);
+        let from = Math.min(...dates);
+        let to = Infinity;
+
+        if (start !== undefined) {
+            // A new message received while waiting isn't the page
+            if (newest > start)
+                return;
+
+            to = start;
+
+            if (messages.length < PAGE_SIZE)
+                from = -Infinity;
+        } else if (messages.length > 1 && messages.length < PAGE_SIZE) {
+            // A single message may be a new one, rather than the whole
+            // conversation
+            from = -Infinity;
+        }
+
+        // Messages received after the device sent the page aren't in it
+        const received = this._receivedWhilePending.get(thread_id);
+
+        const removed = cache.filter(message => {
+            return message.date >= from && message.date <= to &&
+                !dates.has(message.date) && !received?.has(message.date);
+        });
+
+        if (removed.length === 0)
+            return;
+
+        this.threads[thread_id] = cache.filter(message => {
+            return !removed.includes(message);
+        });
+
+        if (this._window) {
+            const conversation = this._window.getConversationForMessage(
+                removed[0]);
+            conversation?.removeMessages?.(removed);
+        }
     }
 
     /**
@@ -499,8 +617,7 @@ const SMSPlugin = GObject.registerClass({
 
     /**
      * Request the latest messages of a conversation that is being opened, to
-     * show those we don't have, such as the ones before the last message from
-     * the conversation list.
+     * show messages we missed and drop those deleted on the device.
      *
      * @param {string} thread_id - The id of the thread
      */

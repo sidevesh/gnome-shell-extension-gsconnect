@@ -305,7 +305,75 @@ describe('The sms plugin', function () {
         expect(localPlugin.threads['2']).toBeDefined();
     });
 
-    it('takes an empty list as a reply only if none arrives', async function () {
+    it('removes messages deleted on the device when opening', async function () {
+        const deleted = [createMessage(1, 1), createMessage(3, 100)];
+
+        phone.threads.set(1, phone.threads.get(1).filter(message => {
+            return message._id !== deleted[0]._id;
+        }));
+        phone.threads.set(3, phone.threads.get(3).filter(message => {
+            return message._id !== deleted[1]._id;
+        }));
+
+        await openConversations('1', '3');
+
+        expect(messageIds('1')).toEqual([1000, 1002, 1003]);
+        expect(messageIds('3').length).toBe(119);
+        expect(messageIds('3')).not.toContain(deleted[1]._id);
+    });
+
+    it('removes deleted messages when loading older ones', async function () {
+        const deleted = createMessage(3, 30);
+
+        phone.threads.set(3, phone.threads.get(3).filter(message => {
+            return message._id !== deleted._id;
+        }));
+
+        // As if only the messages from the deleted one on were loaded
+        localPlugin.threads['3'] = localPlugin.threads['3'].filter(message => {
+            return message.date >= deleted.date;
+        });
+        localPlugin._completeThreads.delete('3');
+
+        expect(localPlugin.requestOlderMessages('3')).toBeTrue();
+        await waitFor(() => !localPlugin._pendingOlderThreads.has('3'));
+
+        const thread = localPlugin.threads['3'];
+        expect(thread.length).toBe(118);
+        expect(thread.map(message => message._id)).not.toContain(deleted._id);
+        expect(thread[0].body).toBe('message 0 of thread 3');
+    });
+
+    it('keeps messages when a new one arrives while opening', async function () {
+        const message = createMessage(1, 4);
+        phone.threads.get(1).push(message);
+
+        // The new message arrives before the requested page
+        localPlugin._pendingThreads.set('1', 0);
+        phone.send([message]);
+        await waitFor(() => localPlugin.threads['1'].length === 4);
+        localPlugin._pendingThreads.delete('1');
+
+        expect(messageIds('1')).toEqual([1000, 1002, 1003, 1004]);
+    });
+
+    it('removes a conversation the device has no messages for', async function () {
+        localPlugin._emptyReplyTime = 0;
+        phone.threads.delete(2);
+
+        localPlugin.refreshConversation('2');
+        await waitFor(() => localPlugin.threads['2'] === undefined);
+
+        // It asked twice before removing it
+        const requests = remoteDevice.handlePacket.calls.allArgs().filter(([packet]) => {
+            return packet.type === 'kdeconnect.sms.request_conversation' &&
+                packet.body.threadID === '2';
+        });
+        expect(requests.length).toBe(2);
+        expect(localPlugin.threads['1']).toBeDefined();
+    });
+
+    it('keeps a conversation when an empty list is not the reply', async function () {
         localPlugin._emptyReplyTime = 0;
 
         // An empty list the device sent because a message was read
