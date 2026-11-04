@@ -12,6 +12,7 @@ import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 import * as NotificationDaemon from 'resource:///org/gnome/shell/ui/notificationDaemon.js';
 
 import {gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
+import Config from '../config.js';
 import {HAS_MESSAGELIST_NOTIFICATIONMESSAGE, getIcon} from './utils.js';
 
 const {NotificationMessage} = HAS_MESSAGELIST_NOTIFICATIONMESSAGE
@@ -43,6 +44,18 @@ function getPlatformData() {
 
 // This is no longer directly exported, so we do this instead for now
 const GtkNotificationDaemon = Main.notificationDaemon._gtkNotificationDaemon.constructor;
+
+// The icon for each device type, as in the service's Device.icon_name
+const DEVICE_ICONS = {
+    laptop: 'laptop-symbolic',
+    phone: 'smartphone-symbolic',
+    tablet: 'tablet-symbolic',
+    tv: 'tv-symbolic',
+};
+
+// A notification source for each device, by device ID. These outlive the
+// extension being disabled (eg. on the lock screen), like the patches below.
+const _deviceSources = new Map();
 
 
 /**
@@ -164,6 +177,123 @@ const NotificationBanner = GObject.registerClass({
 
 
 /**
+ * A notification source for one device's notifications, so they are shown with
+ * the device's name and icon instead of GSConnect's. Actions are passed on to
+ * GSConnect's own source, and GSConnect's notification settings still apply.
+ */
+const DeviceSource = GObject.registerClass({
+    GTypeName: 'GSConnectDeviceNotificationSource',
+}, class DeviceSource extends MessageTray.Source {
+
+    constructor(appSource, settings) {
+        super({
+            policy: new MessageTray.NotificationApplicationPolicy(APP_ID),
+        });
+
+        this._appSource = appSource;
+        this._settings = settings;
+        this._settingsId = settings.connect('changed', this._sync.bind(this));
+        this._sync();
+    }
+
+    _sync() {
+        const type = this._settings.get_string('type');
+
+        this.title = this._settings.get_string('name');
+        this.icon = getIcon(DEVICE_ICONS[type] ?? 'computer-symbolic');
+    }
+
+    activateAction(actionId, target) {
+        this._appSource.activateAction(actionId, target);
+    }
+
+    emitActionInvoked(notificationId, actionId, target) {
+        this._appSource.emitActionInvoked(notificationId, actionId, target);
+    }
+
+    open() {
+        this._appSource.open();
+    }
+
+    destroy(reason) {
+        if (this._settingsId) {
+            this._settings.disconnect(this._settingsId);
+            this._settingsId = 0;
+        }
+
+        super.destroy(reason);
+    }
+});
+
+
+/**
+ * Get the notification source for a device, creating it if needed.
+ *
+ * @param {MessageTray.Source} appSource - GSConnect's own notification source
+ * @param {string} deviceId - The device's ID
+ * @returns {DeviceSource|null} The source, or %null if the device is unknown
+ */
+function getDeviceSource(appSource, deviceId) {
+    let source = _deviceSources.get(deviceId);
+
+    if (source !== undefined) {
+        source._appSource = appSource;
+        return source;
+    }
+
+    let settings;
+
+    try {
+        const schema = Config.GSCHEMA.lookup(
+            'org.gnome.Shell.Extensions.GSConnect.Device', true);
+
+        settings = new Gio.Settings({
+            settings_schema: schema,
+            path: `/org/gnome/shell/extensions/gsconnect/device/${deviceId}/`,
+        });
+    } catch (e) {
+        logError(e, 'GSConnect');
+        return null;
+    }
+
+    // A device that was never paired, or has been forgotten
+    if (settings.get_string('name') === '')
+        return null;
+
+    source = new DeviceSource(appSource, settings);
+    source.createBanner = Source.prototype.createBanner;
+    source._addNotificationToMessageTray =
+        Source.prototype._addNotificationToMessageTray;
+
+    // Keep the saved notifications up to date, as GSConnect's source would
+    const daemon = Main.notificationDaemon._gtkNotificationDaemon;
+    source.connect('notify::count', () => daemon._saveNotifications?.());
+
+    source.connect('destroy', () => _deviceSources.delete(deviceId));
+    _deviceSources.set(deviceId, source);
+    Main.messageTray.add(source);
+
+    return source;
+}
+
+
+/**
+ * Make a copy of a notification from GSConnect's source in its device's source.
+ *
+ * @param {MessageTray.Notification} notification - The notification
+ * @param {DeviceSource} source - The device's source
+ * @returns {MessageTray.Notification} The copy
+ */
+function moveToSource(notification, source) {
+    const copy = new notification.constructor(source, notification.id,
+        notification.serialize().deepUnpack());
+    copy.acknowledged = notification.acknowledged;
+
+    return copy;
+}
+
+
+/**
  * A custom notification source for spawning notifications and closing device
  * notifications. This source isn't actually used, but it's methods are patched
  * into existing sources.
@@ -267,8 +397,13 @@ const Source = GObject.registerClass({
             return cachedNotification;
         }
 
-        // Device Notification
+        // Device Notification, shown with the device's name and icon
         if (idMatch) {
+            const deviceSource = getDeviceSource(this, deviceId);
+
+            if (deviceSource !== null && notification.source !== deviceSource)
+                notification = moveToSource(notification, deviceSource);
+
             notification.deviceId = deviceId;
             notification.remoteId = remoteId;
             notification.requestReplyId = requestReplyId;
@@ -306,7 +441,8 @@ const Source = GObject.registerClass({
         }
 
         const createdNotification = this._createNotification(notification);
-        this._addNotificationToMessageTray(createdNotification);
+        createdNotification.source._addNotificationToMessageTray(
+            createdNotification);
 
         this._notificationPending = false;
     }
@@ -363,6 +499,21 @@ export function patchGSConnectNotificationSource() {
 
         // Connect to existing notifications
         for (const notification of Object.values(source._notifications)) {
+            // Move device notifications restored at login to their device's
+            // source, keeping GSConnect's source while it's briefly empty
+            const idMatch = DEVICE_REGEX.exec(notification.id);
+            const deviceSource = idMatch
+                ? getDeviceSource(source, idMatch[1])
+                : null;
+
+            if (deviceSource !== null) {
+                const copy = moveToSource(notification, deviceSource);
+
+                source._notificationPending = true;
+                notification.destroy(MessageTray.NotificationDestroyedReason.REPLACED);
+                source.addNotification(copy);
+                continue;
+            }
 
             const _id = notification.connect('destroy', (notification, reason) => {
                 source._closeGSConnectNotification(notification, reason);
